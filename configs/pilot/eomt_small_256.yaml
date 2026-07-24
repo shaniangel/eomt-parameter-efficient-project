@@ -1,0 +1,41 @@
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 1
+  limit_train_batches: 2
+  limit_val_batches: 1
+  num_sanity_val_steps: 0
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: eomt-pilot
+      name: eomt-small-256-smoke
+      save_dir: pilot_logs
+      offline: true
+  enable_checkpointing: false
+
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    attn_mask_annealing_enabled: true
+    attn_mask_annealing_start_steps: [6520, 13040, 19560, 26080]
+    attn_mask_annealing_end_steps: [13040, 19560, 26080, 32600]
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 4
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_small_patch14_reg4_dinov2
+
+data:
+  class_path: datasets.ade20k_semantic.ADE20KSemantic
+  init_args:
+    batch_size: 1
+    num_workers: 2
+    img_size: [256, 256]
+
+compile_disabled: true
