@@ -41,6 +41,12 @@ class MaskClassificationSemantic(LightningModule):
         ckpt_path: Optional[str] = None,
         delta_weights: bool = False,
         load_ckpt_class_head: bool = True,
+        # New LoRA / freezing options (accepted from config)
+        freeze_backbone: bool = False,
+        lora_enabled: bool = False,
+        lora_rank: int = 0,
+        lora_alpha: float = 1.0,
+        lora_target_blocks: Optional[List[int]] = None,
     ):
         super().__init__(
             network=network,
@@ -80,6 +86,40 @@ class MaskClassificationSemantic(LightningModule):
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
+
+        # -----------------------------
+        # LoRA integration and freezing
+        # -----------------------------
+        # These options are parsed from the config and enable two behaviors:
+        # 1) freeze_backbone: set requires_grad=False for all backbone params
+        # 2) lora_enabled: attach LoRA adapters to specified backbone blocks
+        # The chosen order is: freeze backbone first, then attach LoRA adapters so
+        # that the original backbone weights remain frozen while LoRA params are trainable.
+        try:
+            # local import to avoid circular import at module load time
+            from models.lora import apply_lora_to_backbone
+        except Exception:
+            apply_lora_to_backbone = None
+
+        # Freeze backbone parameters if requested
+        if freeze_backbone:
+            for p in self.network.encoder.backbone.parameters():
+                p.requires_grad = False
+
+        # Apply LoRA adapters if requested
+        if lora_enabled and apply_lora_to_backbone is not None:
+            target_blocks = lora_target_blocks or [-3, -2, -1]
+            added = apply_lora_to_backbone(
+                self.network.encoder.backbone,
+                target_blocks=target_blocks,
+                rank=lora_rank,
+                alpha=lora_alpha,
+                modules=("qkv", "proj"),
+            )
+            # Log info about added adapters
+            import logging
+
+            logging.info(f"Applied LoRA adapters to blocks {target_blocks}: approx params added={added}")
 
     def eval_step(
         self,

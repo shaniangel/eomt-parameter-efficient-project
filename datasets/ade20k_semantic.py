@@ -59,6 +59,8 @@ class ADE20KSemantic(LightningDataModule):
         return masks, labels, [False for _ in range(len(masks))]
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
+        import zipfile
+
         dataset_kwargs = {
             "img_suffix": ".jpg",
             "target_suffix": ".png",
@@ -67,19 +69,40 @@ class ADE20KSemantic(LightningDataModule):
             "target_parser": self.target_parser,
             "check_empty_targets": self.check_empty_targets,
         }
+
+        # Detect whether the zip contains a top-level ADEChallengeData2016 folder
+        zip_path = dataset_kwargs["zip_path"]
+        candidate_with_root_imgs = Path("ADEChallengeData2016/images/training").as_posix()
+        candidate_without_root_imgs = Path("images/training").as_posix()
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                names = z.namelist()
+                if any(n.startswith(candidate_with_root_imgs) for n in names):
+                    img_train_path = Path("ADEChallengeData2016/images/training")
+                    img_val_path = Path("ADEChallengeData2016/images/validation")
+                    ann_train_path = Path("ADEChallengeData2016/annotations/training")
+                    ann_val_path = Path("ADEChallengeData2016/annotations/validation")
+                else:
+                    img_train_path = Path("images/training")
+                    img_val_path = Path("images/validation")
+                    ann_train_path = Path("annotations/training")
+                    ann_val_path = Path("annotations/validation")
+        except FileNotFoundError:
+            # Fall back to default expected paths; Dataset will handle missing files gracefully
+            img_train_path = Path("ADEChallengeData2016/images/training")
+            img_val_path = Path("ADEChallengeData2016/images/validation")
+            ann_train_path = Path("ADEChallengeData2016/annotations/training")
+            ann_val_path = Path("ADEChallengeData2016/annotations/validation")
+
         self.train_dataset = Dataset(
-            img_folder_path_in_zip=Path("./ADEChallengeData2016/images/training"),
-            target_folder_path_in_zip=Path(
-                "./ADEChallengeData2016/annotations/training"
-            ),
+            img_folder_path_in_zip=img_train_path,
+            target_folder_path_in_zip=ann_train_path,
             transforms=self.transforms,
             **dataset_kwargs,
         )
         self.val_dataset = Dataset(
-            img_folder_path_in_zip=Path("./ADEChallengeData2016/images/validation"),
-            target_folder_path_in_zip=Path(
-                "./ADEChallengeData2016/annotations/validation"
-            ),
+            img_folder_path_in_zip=img_val_path,
+            target_folder_path_in_zip=ann_val_path,
             **dataset_kwargs,
         )
 

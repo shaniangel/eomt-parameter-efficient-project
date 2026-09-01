@@ -112,7 +112,13 @@ class LightningModule(lightning.LightningModule):
             backbone_blocks - self.network.num_blocks, backbone_blocks
         ).tolist()
 
+        # Only include parameters that require gradients. This ensures frozen
+        # backbone weights (requires_grad=False) are excluded from optimizer.
         for name, param in reversed(list(self.named_parameters())):
+            if not param.requires_grad:
+                # skip frozen params (e.g., frozen backbone when using LoRA)
+                continue
+
             lr = self.lr
 
             if name.replace("network.encoder.backbone.", "") in encoder_param_names:
@@ -147,6 +153,11 @@ class LightningModule(lightning.LightningModule):
                 other_param_groups.append(
                     {"params": [param], "lr": self.lr, "name": name}
                 )
+
+        # Log parameter counts for diagnostics: total vs trainable
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        logging.info(f"Parameters: total={total_params:,}, trainable={trainable_params:,} ({100 * trainable_params / max(1, total_params):.2f}%)")
 
         param_groups = backbone_param_groups + other_param_groups
         optimizer = AdamW(param_groups, weight_decay=self.weight_decay)

@@ -140,12 +140,45 @@ class LightningCLI(cli.LightningCLI):
         )
 
     def fit(self, model, **kwargs):
-        if hasattr(self.trainer.logger.experiment, "log_code"):
+        # Create a unique run directory under the logger save_dir so each run has its own folder.
+        from pathlib import Path
+        import datetime
+        import json
+
+        try:
+            logger_save_dir = Path(getattr(self.trainer.logger, "save_dir", "pilot_logs"))
+            logger_name = getattr(self.trainer.logger, "name", "run")
+        except Exception:
+            logger_save_dir = Path("pilot_logs")
+            logger_name = "run"
+
+        timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        run_dir = logger_save_dir / f"{logger_name}_{timestamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Try to steer the logger to write under this run dir where possible
+        try:
+            if hasattr(self.trainer.logger, "save_dir"):
+                self.trainer.logger.save_dir = str(run_dir)
+        except Exception:
+            pass
+
+        # Save the intended run_dir for later use
+        self._run_dir = run_dir
+
+        # Optional: log code (if logger/expt supports it)
+        if hasattr(self.trainer.logger, "experiment") and hasattr(
+            self.trainer.logger.experiment, "log_code"
+        ):
             is_gitignored = parse_gitignore(".gitignore")
             include_fn = lambda path: path.endswith(".py") or path.endswith(".yaml")
-            self.trainer.logger.experiment.log_code(
-                ".", include_fn=include_fn, exclude_fn=is_gitignored
-            )
+            try:
+                self.trainer.logger.experiment.log_code(
+                    ".", include_fn=include_fn, exclude_fn=is_gitignored
+                )
+            except Exception:
+                # don't fail training for logging errors
+                pass
 
         self.trainer.fit_loop.epoch_loop._should_check_val_fx = MethodType(
             _should_check_val_fx, self.trainer.fit_loop.epoch_loop
@@ -154,7 +187,37 @@ class LightningCLI(cli.LightningCLI):
         if not self.config[self.config["subcommand"]]["compile_disabled"]:
             model = torch.compile(model)
 
+        # Run training
         self.trainer.fit(model, **kwargs)
+
+        # After training, run validation and persist metrics to the run directory
+        try:
+            dm = getattr(self, "datamodule", None)
+            # Run a validation pass (no grad)
+            val_results = self.trainer.validate(model, datamodule=dm)
+
+            # Write validation results into a JSON file in the run dir
+            metrics_path = Path(getattr(self, "_run_dir", "pilot_logs")) / "validation_metrics.json"
+            try:
+                with open(metrics_path, "w", encoding="utf-8") as f:
+                    json.dump(val_results, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
+            # Also push metrics to the logger if available
+            if hasattr(self.trainer, "logger") and hasattr(self.trainer.logger, "log_metrics"):
+                # If val_results is a list of dicts (as Lightning returns), log the first
+                to_log = val_results[0] if isinstance(val_results, (list, tuple)) and val_results else val_results
+                try:
+                    # flatten nested metrics if necessary
+                    if isinstance(to_log, dict):
+                        self.trainer.logger.log_metrics({k: float(v) for k, v in to_log.items()})
+                except Exception:
+                    pass
+
+        except Exception:
+            # don't fail the whole run if validation/logging fails
+            logging.exception("Validation after training failed")
 
 
 def cli_main():
