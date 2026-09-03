@@ -2,7 +2,7 @@ trainer:
   accelerator: auto  # choose CPU or GPU automatically
   devices: 1
   precision: 32  # default to 32-bit to be safe on CPU; override on GPU via CLI if desired
-  max_epochs: 10
+  max_epochs: 1
   limit_train_batches: 2
   limit_val_batches: 1
   num_sanity_val_steps: 0
@@ -25,12 +25,16 @@ model:
     attn_mask_annealing_enabled: true
     attn_mask_annealing_start_steps: [6520, 13040, 19560, 26080]
     attn_mask_annealing_end_steps: [13040, 19560, 26080, 32600]
-    # LoRA and freezing options (consumed by LightningModule init if added)
+    # LoRA and freezing options.
+    # Prefer the dict-based lora_config to keep per-block settings explicit and
+    # easy to override from the sweep script.
     freeze_backbone: true
     lora_enabled: true
-    lora_rank: 8
-    lora_alpha: 1.0
-    lora_target_blocks: [-3, -2, -1]
+    lora_config:
+      "-3,-2,-1":
+        rank: 8
+        alpha: 1.0
+        modules: ["qkv", "proj"]
     network:
       class_path: models.eomt.EoMT
       init_args:
@@ -44,6 +48,7 @@ model:
 data:
   class_path: datasets.ade20k_semantic.ADE20KSemantic
   init_args:
+    path: data/ade20k
     batch_size: 1
     num_workers: 2
     img_size: [256, 256]

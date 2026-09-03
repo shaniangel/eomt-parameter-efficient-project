@@ -4,7 +4,7 @@
 # ---------------------------------------------------------------
 
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -47,6 +47,7 @@ class MaskClassificationSemantic(LightningModule):
         lora_rank: int = 0,
         lora_alpha: float = 1.0,
         lora_target_blocks: Optional[List[int]] = None,
+        lora_config: Optional[Union[str, Dict[str, Any]]] = None,
     ):
         super().__init__(
             network=network,
@@ -108,18 +109,47 @@ class MaskClassificationSemantic(LightningModule):
 
         # Apply LoRA adapters if requested
         if lora_enabled and apply_lora_to_backbone is not None:
-            target_blocks = lora_target_blocks or [-3, -2, -1]
-            added = apply_lora_to_backbone(
-                self.network.encoder.backbone,
-                target_blocks=target_blocks,
-                rank=lora_rank,
-                alpha=lora_alpha,
-                modules=("qkv", "proj"),
-            )
-            # Log info about added adapters
-            import logging
+            # Try parsing lora_config (JSON string or Python literal) if provided
+            lora_spec = None
+            if lora_config:
+                try:
+                    import json
 
-            logging.info(f"Applied LoRA adapters to blocks {target_blocks}: approx params added={added}")
+                    if isinstance(lora_config, str):
+                        lora_spec = json.loads(lora_config)
+                    elif isinstance(lora_config, dict):
+                        lora_spec = lora_config
+                except Exception:
+                    try:
+                        lora_spec = eval(lora_config)
+                    except Exception:
+                        raise ValueError("Could not parse lora_config; provide a JSON string or Python dict literal")
+
+            if lora_spec is not None:
+                added = apply_lora_to_backbone(
+                    self.network.encoder.backbone,
+                    target_blocks=lora_spec,
+                    modules=("qkv", "proj"),
+                )
+                import logging
+                logging.info(f"Applied LoRA adapters via lora_config: approx params added={added}")
+            else:
+                # Fallback to legacy args
+                target_blocks = lora_target_blocks or [-3, -2, -1]
+                # allow comma-separated string form for the target blocks
+                if isinstance(target_blocks, str):
+                    target_blocks = [int(x) for x in target_blocks.split(",") if x.strip()]
+
+                # allow lora_rank/alpha be csv lists or scalars (handled inside function)
+                added = apply_lora_to_backbone(
+                    self.network.encoder.backbone,
+                    target_blocks=target_blocks,
+                    rank=lora_rank,
+                    alpha=lora_alpha,
+                    modules=("qkv", "proj"),
+                )
+                import logging
+                logging.info(f"Applied LoRA adapters to blocks {target_blocks}: approx params added={added}")
 
     def eval_step(
         self,

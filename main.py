@@ -163,6 +163,37 @@ class LightningCLI(cli.LightningCLI):
         except Exception:
             pass
 
+        # Ensure a CSVLogger is present so per-epoch metrics.csv files are written
+        # (this enables plotting per-epoch curves). We prefer adding a CSV logger
+        # rather than replacing the configured logger.
+        try:
+            from lightning.pytorch.loggers import CSVLogger
+
+            # build list of existing loggers
+            try:
+                existing = list(self.trainer.loggers) if isinstance(self.trainer.loggers, (list, tuple)) else [self.trainer.logger]
+            except Exception:
+                existing = [self.trainer.logger] if getattr(self.trainer, "logger", None) else []
+
+            has_csv = any(getattr(l, "__class__", type(None)).__name__ == "CSVLogger" for l in existing if l)
+            if not has_csv:
+                # create CSVLogger that writes under the same run_dir
+                csv_logger = CSVLogger(save_dir=str(run_dir.parent), name=run_dir.name)
+                try:
+                    # attach to trainer.loggers (works whether it was a list or single)
+                    if isinstance(self.trainer.loggers, list):
+                        self.trainer.loggers.append(csv_logger)
+                    else:
+                        self.trainer.loggers = existing + [csv_logger]
+                except Exception:
+                    try:
+                        self.trainer.loggers = existing + [csv_logger]
+                    except Exception:
+                        pass
+        except Exception:
+            # don't fail training if logger plumbing fails
+            pass
+
         # Save the intended run_dir for later use
         self._run_dir = run_dir
 

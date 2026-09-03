@@ -12,7 +12,7 @@
 #   blocks with LoRALinear wrappers so only the LoRA parameters are
 #   trainable when the backbone is frozen.
 
-from typing import List, Sequence, Optional
+from typing import List, Sequence, Optional, Union, Mapping, Any
 import torch
 import torch.nn as nn
 
@@ -101,26 +101,126 @@ def _iter_target_blocks(backbone, target_blocks: Sequence[int]):
         yield idx, blocks[idx]
 
 
+def _broadcast_param(value: Union[int, float, Sequence], length: int):
+    """Broadcast a scalar or verify a sequence matches `length`.
+
+    Returns a list of length `length` containing the values.
+    """
+    if isinstance(value, (list, tuple)):
+        if len(value) != length:
+            raise ValueError(f"Expected length {length}, got {len(value)}")
+        return list(value)
+    else:
+        return [value] * length
+
+
 def apply_lora_to_backbone(
     backbone: nn.Module,
-    target_blocks: Sequence[int] = (-3, -2, -1),
-    rank: int = 8,
-    alpha: float = 1.0,
+    target_blocks: Union[Sequence[int], Mapping[Any, Any]] = (-3, -2, -1),
+    rank: Union[int, Sequence[int]] = 8,
+    alpha: Union[float, Sequence[float]] = 1.0,
     modules: Optional[Sequence[str]] = ("qkv", "proj"),
 ) -> int:
     """
     Replace target Linear layers in the backbone's attention modules with LoRALinear wrappers.
 
-    - backbone: ViT backbone adapted by models.vit (has .blocks)
-    - target_blocks: indices (can be negative) of blocks to modify
-    - rank, alpha: LoRA hyperparameters
-    - modules: names of Linear attributes to replace inside attention module
+    target_blocks may be either:
+      - a sequence of int indices (legacy behavior), or
+      - a Mapping where each key specifies one or more block indices and the
+        corresponding value gives the LoRA spec for those blocks. Keys may be:
+          - int (e.g. -3)
+          - tuple/list (e.g. (-4, -3))
+          - string forms like "-3", "-4,-3", or "(-4,-3)"
+        Values may be:
+          - scalar (interpreted as rank)
+          - sequence [rank, alpha]
+          - mapping {"rank": int, "alpha": float, "modules": [..]}
 
-    Returns number of LoRA parameters added (approx).
+    Returns approximate number of adapter parameters added.
     """
+    blocks = list(backbone.blocks)
+    n = len(blocks)
+
     added = 0
-    for idx, block in _iter_target_blocks(backbone, target_blocks):
-        # attention may be stored as block.attn or block.attention
+    if isinstance(target_blocks, Mapping):
+        # Build per-block spec: idx -> (rank, alpha, modules)
+        per_block: dict[int, tuple[int, float, Optional[Sequence[str]]]] = {}
+        for key, val in target_blocks.items():
+            # parse key into list of ints
+            if isinstance(key, (list, tuple)):
+                keys = list(key)
+            elif isinstance(key, int):
+                keys = [key]
+            elif isinstance(key, str):
+                s = key.strip()
+                try:
+                    if (s.startswith("(") and s.endswith(")")) or (
+                        s.startswith("[") and s.endswith("]")
+                    ):
+                        ks = eval(s)
+                        keys = list(ks) if isinstance(ks, (list, tuple)) else [int(ks)]
+                    elif "," in s:
+                        keys = [int(x) for x in s.split(",") if x.strip()]
+                    else:
+                        keys = [int(s)]
+                except Exception:
+                    raise ValueError(f"Could not parse LoRA target key: {key}")
+            else:
+                raise ValueError(f"Unsupported LoRA target key type: {type(key)}")
+
+            # parse value into rank/alpha/modules
+            if isinstance(val, Mapping):
+                r = val.get("rank", rank)
+                a = val.get("alpha", alpha)
+                mods = val.get("modules", modules)
+            elif isinstance(val, (list, tuple)):
+                if len(val) >= 2:
+                    r, a = val[0], val[1]
+                else:
+                    r = val[0]
+                    a = alpha
+                mods = modules
+            else:
+                # scalar interpreted as rank
+                r = val
+                a = alpha
+                mods = modules
+
+            for k in keys:
+                per_block[int(k)] = (int(r), float(a), tuple(mods) if mods is not None else modules)
+
+        # Apply per-block adapters
+        for idx, (r, a, mods) in per_block.items():
+            resolved_idx = idx if idx >= 0 else n + idx
+            if resolved_idx < 0 or resolved_idx >= n:
+                raise IndexError(f"Block index {idx} out of range for backbone with {n} blocks")
+            block = blocks[resolved_idx]
+            attn = getattr(block, "attn", None) or getattr(block, "attention", None)
+            if attn is None:
+                continue
+            for name in mods:
+                if hasattr(attn, name):
+                    linear = getattr(attn, name)
+                    if isinstance(linear, nn.Linear):
+                        wrapped = LoRALinear(linear, rank=int(r), alpha=float(a))
+                        setattr(attn, name, wrapped)
+                        added += int(r) * (linear.in_features + linear.out_features)
+        return added
+
+    # Fallback: sequence of indices with optional broadcasted rank/alpha (legacy behavior)
+    target_blocks_list = list(target_blocks)
+    num_targets = len(target_blocks_list)
+
+    ranks = _broadcast_param(rank, num_targets)
+    alphas = _broadcast_param(alpha, num_targets)
+
+    for idx, r, a in zip(target_blocks_list, ranks, alphas):
+        # resolve negative indices
+        resolved_idx = idx if idx >= 0 else n + idx
+        if resolved_idx < 0 or resolved_idx >= n:
+            raise IndexError(f"Block index {idx} out of range for backbone with {n} blocks")
+
+        block = blocks[resolved_idx]
         attn = getattr(block, "attn", None) or getattr(block, "attention", None)
         if attn is None:
             continue
@@ -128,12 +228,12 @@ def apply_lora_to_backbone(
         for name in modules:
             if hasattr(attn, name):
                 linear = getattr(attn, name)
-                # if it's a fused qkv (nn.Linear) or proj (nn.Linear), wrap it
                 if isinstance(linear, nn.Linear):
-                    wrapped = LoRALinear(linear, rank=rank, alpha=alpha)
+                    wrapped = LoRALinear(linear, rank=int(r), alpha=float(a))
                     setattr(attn, name, wrapped)
-                    added += rank * (linear.in_features + linear.out_features)
+                    added += int(r) * (linear.in_features + linear.out_features)
                 else:
-                    # If not a Linear, skip (could be a fused kernel or custom op)
+                    # skip non-linear modules (custom/fused ops)
                     continue
+
     return added
