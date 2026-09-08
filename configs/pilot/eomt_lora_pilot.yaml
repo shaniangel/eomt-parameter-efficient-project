@@ -2,7 +2,7 @@ trainer:
   accelerator: auto  # choose CPU or GPU automatically
   devices: 1
   precision: 32  # default to 32-bit to be safe on CPU; override on GPU via CLI if desired
-  max_epochs: 1
+  max_epochs: 10
   limit_train_batches: 2
   limit_val_batches: 1
   num_sanity_val_steps: 0

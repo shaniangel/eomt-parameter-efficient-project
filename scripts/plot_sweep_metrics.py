@@ -62,8 +62,12 @@ def _choose_metric_name(fieldnames):
     return keys[0] if keys else None
 
 
-def _collect_epoch_series(run_dir: Path):
-    """Return (x, y, metric_name) or None if no series can be found."""
+def _collect_epoch_series(run_dir: Path, preferred_metric: str | None = None):
+    """Return (x, y, metric_name) or None if no series can be found.
+
+    If preferred_metric is provided, attempt to find that column (exact or substring
+    match) in available CSVs and return its series even if it has only one point.
+    """
     csv_paths = sorted(run_dir.glob("**/metrics.csv"))
     if not csv_paths:
         return None
@@ -80,9 +84,34 @@ def _collect_epoch_series(run_dir: Path):
             continue
 
         fieldnames = reader.fieldnames or []
-        metric_name = _choose_metric_name(fieldnames)
-        if metric_name is None:
-            continue
+
+        # If user provided a preferred metric, try to locate a matching column.
+        metric_name = None
+        if preferred_metric:
+            # exact match
+            for fn in fieldnames:
+                if fn == preferred_metric:
+                    metric_name = fn
+                    break
+            # case-insensitive exact
+            if metric_name is None:
+                for fn in fieldnames:
+                    if fn.lower() == preferred_metric.lower():
+                        metric_name = fn
+                        break
+            # substring match
+            if metric_name is None:
+                for fn in fieldnames:
+                    if preferred_metric.lower() in fn.lower():
+                        metric_name = fn
+                        break
+            if metric_name is None:
+                # preferred metric asked but not found in this CSV; try next CSV
+                continue
+        else:
+            metric_name = _choose_metric_name(fieldnames)
+            if metric_name is None:
+                continue
 
         xs, ys = [], []
         for row in rows:
@@ -100,14 +129,24 @@ def _collect_epoch_series(run_dir: Path):
                 xs.append(float(x))
                 ys.append(float(y))
 
-        if len(ys) >= 2:
+        # If preferred_metric was requested, accept series with >=1 points, otherwise require >=2
+        min_points = 1 if preferred_metric else 2
+        if len(ys) >= min_points:
             return xs, ys, metric_name
 
     return None
 
 
-def _discover_run_dirs(root: Path, run_name: str | None = None, run_dir: Path | None = None, latest: bool = False):
-    pilot_root = (root / "pilot_logs").resolve()
+def _discover_run_dirs(root: Path, pilot_root: Path | None = None, run_name: str | None = None, run_dir: Path | None = None, latest: bool = False):
+    pilot_root = (pilot_root or (root / "pilot_logs")).resolve()
+
+    # Determine sensible sweep summary path next to the pilot_logs folder (e.g., sweeps/<name>/runs/sweep_summary.json)
+    summary_candidates = [pilot_root.parent / "runs" / "sweep_summary.json", (root / "runs" / "sweep_summary.json").resolve()]
+    summary_path = None
+    for p in summary_candidates:
+        if p.exists():
+            summary_path = p.resolve()
+            break
 
     if run_dir is not None:
         return [run_dir.resolve()]
@@ -116,17 +155,23 @@ def _discover_run_dirs(root: Path, run_name: str | None = None, run_dir: Path | 
         candidate = (pilot_root / run_name).resolve()
         if candidate.exists() and candidate.is_dir():
             return [candidate]
-        summary = (root / "runs" / "sweep_summary.json").resolve()
-        if summary.exists():
+        if summary_path is not None:
             try:
-                data = json.loads(summary.read_text(encoding="utf-8"))
-                for entry in data:
-                    if entry.get("run_name") == run_name:
-                        candidate = (pilot_root / run_name).resolve()
-                        if candidate.exists() and candidate.is_dir():
-                            return [candidate]
+                    data = json.loads(summary_path.read_text(encoding="utf-8"))
+                    for entry in data:
+                        if entry.get("run_name") == run_name:
+                            # If the sweeper recorded an explicit run_dir, prefer it
+                            run_dir_recorded = entry.get("run_dir")
+                            if run_dir_recorded:
+                                cand = Path(run_dir_recorded).resolve()
+                                if cand.exists() and cand.is_dir():
+                                    return [cand]
+                            # Otherwise try to find matching folder under pilot_root
+                            matches = sorted(pilot_root.glob(f"{run_name}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                            if matches:
+                                return [matches[0].resolve()]
             except Exception:
-                pass
+                    pass
         return []
 
     if latest:
@@ -138,25 +183,28 @@ def _discover_run_dirs(root: Path, run_name: str | None = None, run_dir: Path | 
     # per-run directories. If no summary is available, fall back to listing the
     # pilot_logs/ subfolders.
     run_dirs = []
-    summary = (root / "runs" / "sweep_summary.json").resolve()
-    if summary.exists():
+    if summary_path is not None:
         try:
-            data = json.loads(summary.read_text(encoding="utf-8"))
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
             for entry in data:
-                run_name = entry.get("run_name")
-                if not run_name:
-                    continue
-                # run directories are created as <logger_name>_<timestamp>, and the
-                # sweeper used the logger name equal to the run_name. Find the
-                # most recent directory that starts with the run_name prefix.
-                matches = sorted(pilot_root.glob(f"{run_name}*"), key=lambda p: p.stat().st_mtime, reverse=True)
-                if matches:
-                    run_dirs.append(matches[0].resolve())
-                else:
-                    # keep the intended run_name as a synthetic path so plotting can
-                    # still use the sweep summary's final metrics when no directory
-                    # with the exact prefix is present
-                    run_dirs.append((pilot_root / run_name).resolve())
+                    run_name = entry.get("run_name")
+                    if not run_name:
+                        continue
+                    # Prefer an explicit run_dir recorded by the sweeper
+                    run_dir_recorded = entry.get("run_dir")
+                    if run_dir_recorded:
+                        cand = Path(run_dir_recorded).resolve()
+                        if cand.exists() and cand.is_dir():
+                            run_dirs.append(cand)
+                            continue
+
+                    # run directories are commonly created as <logger_name>_<timestamp>.
+                    matches = sorted(pilot_root.glob(f"{run_name}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if matches:
+                        run_dirs.append(matches[0].resolve())
+                    else:
+                        candidate = (pilot_root / run_name).resolve()
+                        run_dirs.append(candidate)
         except Exception:
             run_dirs = []
 
@@ -164,19 +212,23 @@ def _discover_run_dirs(root: Path, run_name: str | None = None, run_dir: Path | 
     if not run_dirs:
         for p in sorted(pilot_root.glob("*")):
             if p.is_dir():
-                run_dirs.append(p)
+                    run_dirs.append(p)
 
-    # de-duplicate while preserving order
+    # de-duplicate while preserving order (compare resolved paths when possible)
     seen = set()
     deduped = []
     for d in run_dirs:
-        if d not in seen:
-            seen.add(d)
-            deduped.append(d)
+        try:
+            key = d.resolve()
+        except Exception:
+            key = d
+        if key not in seen:
+            seen.add(key)
+            deduped.append(key)
     return deduped
 
 
-def _plot_grid(run_dirs, out_path: Path):
+def _plot_grid(run_dirs, out_path: Path, metric: str | None = None):
     if not run_dirs:
         raise FileNotFoundError("No run folders with metrics were found under pilot_logs/. Run the sweep first.")
 
@@ -203,7 +255,7 @@ def _plot_grid(run_dirs, out_path: Path):
         title = run_dir.name
         status = summary_info.get(run_dir.name, {})
         run_rc = status.get("return_code")
-        series = _collect_epoch_series(run_dir)
+        series = _collect_epoch_series(run_dir, preferred_metric=metric)
         if series is None:
             # If there is a sweep summary with final metrics for this run, plot the final value as a single point
             if run_rc not in (None, 0):
@@ -226,9 +278,26 @@ def _plot_grid(run_dirs, out_path: Path):
                     final_metrics = None
 
             if final_metrics:
-                # choose the best metric key available
+                # choose the best metric key available (respect user-specified metric if provided)
                 keys = list(final_metrics.keys())
-                metric_name = _choose_metric_name(keys)
+                if metric:
+                    # try exact, case-insensitive, or substring
+                    metric_name = None
+                    if metric in final_metrics:
+                        metric_name = metric
+                    else:
+                        for k in keys:
+                            if k.lower() == metric.lower():
+                                metric_name = k
+                                break
+                        if metric_name is None:
+                            for k in keys:
+                                if metric.lower() in k.lower():
+                                    metric_name = k
+                                    break
+                else:
+                    metric_name = _choose_metric_name(keys)
+
                 if metric_name and metric_name in final_metrics:
                     y = final_metrics.get(metric_name)
                     try:
@@ -272,27 +341,37 @@ def _plot_grid(run_dirs, out_path: Path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--pilot-logs", type=Path, default=ROOT / "pilot_logs", help="Root folder containing run folders (pilot_logs)")
     parser.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--run-name", type=str, default=None, help="Specific run directory name under pilot_logs/")
     parser.add_argument("--run-dir", type=Path, default=None, help="Exact run directory path to plot")
     parser.add_argument("--latest", action="store_true", help="Plot only the newest run under pilot_logs/")
+    parser.add_argument("--metric", type=str, default=None, help="Metric column name to plot (exact or substring).")
     args = parser.parse_args()
 
     root = args.root.resolve()
-    out = args.out.resolve()
+    pilot_root = args.pilot_logs.resolve()
+
+    # If the user didn't pass a custom --out, place the plot next to the sweep's runs folder
+    default_out_resolved = DEFAULT_OUTPUT.resolve()
+    if args.out.resolve() == default_out_resolved:
+        candidate_out = (pilot_root.parent / "runs" / "sweep_metrics_grid.png").resolve()
+        out = candidate_out
+    else:
+        out = args.out.resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = _discover_run_dirs(root, run_name=args.run_name, run_dir=args.run_dir, latest=args.latest)
+    run_dirs = _discover_run_dirs(root, pilot_root=pilot_root, run_name=args.run_name, run_dir=args.run_dir, latest=args.latest)
     if not run_dirs:
         if args.run_name or args.run_dir or args.latest:
             target = args.run_name or str(args.run_dir) or "latest run"
             print(f"No matching run directory found for: {target}")
         else:
-            print(f"No run directories found under {root / 'pilot_logs'}. Try running the sweep first.")
+            print(f"No run directories found under {pilot_root}. Try running the sweep first.")
         return 1
 
-    _plot_grid(run_dirs, out)
+    _plot_grid(run_dirs, out, metric=args.metric)
     return 0
 
 
