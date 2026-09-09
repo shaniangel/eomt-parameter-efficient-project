@@ -3,16 +3,15 @@ trainer:
   devices: 1
   precision: 32  # default to 32-bit to be safe on CPU; override on GPU via CLI if desired
   max_epochs: 10
-  limit_train_batches: 2
+  limit_train_batches: 1
   limit_val_batches: 1
   num_sanity_val_steps: 0
+  log_every_n_steps: 1
   logger:
-    class_path: lightning.pytorch.loggers.WandbLogger
+    class_path: lightning.pytorch.loggers.CSVLogger
     init_args:
-      project: eomt-pilot
       name: eomt-lora-pilot
       save_dir: pilot_logs
-      offline: true
   enable_checkpointing: true
 
 # Checkpoints will be saved by Lightning's default ModelCheckpoint when
@@ -50,7 +49,7 @@ data:
   init_args:
     path: data/ade20k
     batch_size: 1
-    num_workers: 2
+    num_workers: 0
     img_size: [256, 256]
 
 compile_disabled: true

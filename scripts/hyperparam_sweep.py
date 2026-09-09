@@ -148,37 +148,86 @@ def main(out: str | Path, dry: bool = False, sweep_name: str | None = None, prew
         else:
             print(f"Dry run mode: prewarm command would run and log to {prewarm_log}")
 
-    # Grid: regimes and a couple hyperparameters. Edit as needed.
-    regimes = [
+    # LoRA Structural Exploration Space
+    # Uniform rank per run to keep search space feasible
+    '''lora_ranks = [8, 32]
+
+    # Testing depth variations (Local vs Mid-to-Deep vs Target Block)
+    target_layer_sets = {
+        "last1": "-1",  # Very local (final query layer)
+        "last3": "-3,-2,-1",  # Standard local baseline
+        "last6": "-6,-5,-4,-3,-2,-1",  # Deep adaptation
+    }
+
+    # Regime-tailored grids (Coarse screening settings)
+    regime_configs = [
         {
             "name": "full-finetune",
             "model_init": {"freeze_backbone": False, "lora_enabled": False},
+            "lrs": [1e-4, 3e-4],
+            "weight_decays": [0.05],
         },
         {
             "name": "frozen-backbone",
             "model_init": {"freeze_backbone": True, "lora_enabled": False},
+            "lrs": [1e-3, 5e-3],
+            "weight_decays": [0.01],
         },
         {
             "name": "local-lora",
             "model_init": {"freeze_backbone": True, "lora_enabled": True},
+            "lrs": [5e-4, 1e-3],
+            "weight_decays": [0.01],
+        },
+    ]'''
+
+    lora_ranks = [32]
+
+    # Testing depth variations (Local vs Mid-to-Deep vs Target Block)
+    target_layer_sets = {
+        "last1": "-1",  # Very local (final query layer)
+    }
+
+    # Regime-tailored grids (Coarse screening settings)
+    regime_configs = [
+        {
+            "name": "full-finetune",
+            "model_init": {"freeze_backbone": False, "lora_enabled": False},
+            "lrs": [1e-3],
+            "weight_decays": [0.01],
+        },
+        {
+            "name": "frozen-backbone",
+            "model_init": {"freeze_backbone": True, "lora_enabled": False},
+            "lrs": [1e-3],
+            "weight_decays": [0.01],
+        },
+        {
+            "name": "local-lora",
+            "model_init": {"freeze_backbone": True, "lora_enabled": True},
+            "lrs": [1e-3],
+            "weight_decays": [0.01],
         },
     ]
 
-    lrs = [1e-4]
-    weight_decays = [0.05]
-    lora_ranks = [4]
-
     runs = []
+    timestamp_str = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
 
-    for regime in regimes:
-        for lr, wd in itertools.product(lrs, weight_decays):
-            if regime["name"] == "local-lora":
-                for r in lora_ranks:
+    for regime in regime_configs:
+        regime_name = regime["name"]
+
+        for lr, wd in itertools.product(regime["lrs"], regime["weight_decays"]):
+            if regime_name == "local-lora":
+                for r, (layer_tag, layers) in itertools.product(lora_ranks, target_layer_sets.items()):
+                    run_name = f"{regime_name}_lr{lr}_wd{wd}_r{r}_{layer_tag}_{timestamp_str}"
+
                     cfg = {
                         "model_init": {
                             **regime["model_init"],
+                            "lr": lr,
+                            "weight_decay": wd,
                             "lora_config": {
-                                "-3,-2,-1": {"rank": r, "alpha": 1.0, "modules": ["qkv", "proj"]}
+                                layers: {"rank": r, "alpha": r, "modules": ["qkv", "proj"]}
                             },
                         },
                         "trainer": {"devices": 1},
@@ -187,22 +236,21 @@ def main(out: str | Path, dry: bool = False, sweep_name: str | None = None, prew
                             "img_size": [512, 512],
                         },
                     }
-                    run_name = f"{regime['name']}_lr{lr}_wd{wd}_r{r}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-                    cfg["model_init"]["lr"] = lr
-                    cfg["model_init"]["weight_decay"] = wd
                     runs.append((run_name, cfg))
             else:
+                run_name = f"{regime_name}_lr{lr}_wd{wd}_{timestamp_str}"
                 cfg = {
-                    "model_init": {**regime["model_init"]},
+                    "model_init": {
+                        **regime["model_init"],
+                        "lr": lr,
+                        "weight_decay": wd,
+                    },
                     "trainer": {"devices": 1},
                     "data_init": {
                         "path": data_path,
                         "img_size": [512, 512],
                     },
                 }
-                run_name = f"{regime['name']}_lr{lr}_wd{wd}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-                cfg["model_init"]["lr"] = lr
-                cfg["model_init"]["weight_decay"] = wd
                 runs.append((run_name, cfg))
 
     summary = []
@@ -229,18 +277,12 @@ def main(out: str | Path, dry: bool = False, sweep_name: str | None = None, prew
             proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(ROOT))
             ret = proc.wait()
 
-        # After run, detect new run directory(ies) created under pilot_logs_root
-        after_dirs = sorted([p.resolve() for p in pilot_logs_root.glob("**/*") if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+        after_dirs = sorted([p.resolve() for p in pilot_logs_root.glob("**/*") if p.is_dir()],
+                            key=lambda p: p.stat().st_mtime, reverse=True)
         new_dirs = [d for d in after_dirs if d not in before_dirs]
 
         metrics = None
-        candidate = None
-        if new_dirs:
-            # pick most recent new dir
-            candidate = new_dirs[0]
-        elif after_dirs:
-            # fallback to most recent dir overall
-            candidate = after_dirs[0]
+        candidate = new_dirs[0] if new_dirs else (after_dirs[0] if after_dirs else None)
 
         if candidate is not None:
             metrics_path = candidate / "validation_metrics.json"
@@ -251,7 +293,14 @@ def main(out: str | Path, dry: bool = False, sweep_name: str | None = None, prew
                 except Exception:
                     metrics = None
 
-        summary.append({"run_name": run_name, "cmd": cmd, "return_code": ret, "metrics": metrics, "log": str(log_file), "run_dir": str(candidate) if candidate is not None else None})
+        summary.append({
+            "run_name": run_name,
+            "cmd": cmd,
+            "return_code": ret,
+            "metrics": metrics,
+            "log": str(log_file),
+            "run_dir": str(candidate) if candidate is not None else None
+        })
 
         # flush summary to disk after each run
         summary_path = out / "sweep_summary.json"

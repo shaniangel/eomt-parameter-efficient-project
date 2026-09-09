@@ -15,6 +15,7 @@
 from typing import List, Sequence, Optional, Union, Mapping, Any
 import torch
 import torch.nn as nn
+import math
 
 
 class LoRALinear(nn.Module):
@@ -53,7 +54,7 @@ class LoRALinear(nn.Module):
             self.alpha = alpha
             # initialize A with zeros and B with zeros so adapter is inactive at init
             # (keeps original behavior)
-            nn.init.zeros_(self.lora_A)
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
             nn.init.zeros_(self.lora_B)
         else:
             self.rank = 0

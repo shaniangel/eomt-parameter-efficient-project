@@ -145,6 +145,7 @@ class LightningCLI(cli.LightningCLI):
         import datetime
         import json
 
+        # 1. Determine unique run directory
         try:
             logger_save_dir = Path(getattr(self.trainer.logger, "save_dir", "pilot_logs"))
             logger_name = getattr(self.trainer.logger, "name", "run")
@@ -155,99 +156,45 @@ class LightningCLI(cli.LightningCLI):
         timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         run_dir = logger_save_dir / f"{logger_name}_{timestamp}"
         run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Try to steer the logger to write under this run dir where possible
-        try:
-            if hasattr(self.trainer.logger, "save_dir"):
-                self.trainer.logger.save_dir = str(run_dir)
-        except Exception:
-            pass
-
-        # Ensure a CSVLogger is present so per-epoch metrics.csv files are written
-        # (this enables plotting per-epoch curves). We prefer adding a CSV logger
-        # rather than replacing the configured logger.
-        try:
-            from lightning.pytorch.loggers import CSVLogger
-
-            # build list of existing loggers
-            try:
-                existing = list(self.trainer.loggers) if isinstance(self.trainer.loggers, (list, tuple)) else [self.trainer.logger]
-            except Exception:
-                existing = [self.trainer.logger] if getattr(self.trainer, "logger", None) else []
-
-            has_csv = any(getattr(l, "__class__", type(None)).__name__ == "CSVLogger" for l in existing if l)
-            if not has_csv:
-                # create CSVLogger that writes under the same run_dir
-                csv_logger = CSVLogger(save_dir=str(run_dir.parent), name=run_dir.name)
-                try:
-                    # attach to trainer.loggers (works whether it was a list or single)
-                    if isinstance(self.trainer.loggers, list):
-                        self.trainer.loggers.append(csv_logger)
-                    else:
-                        self.trainer.loggers = existing + [csv_logger]
-                except Exception:
-                    try:
-                        self.trainer.loggers = existing + [csv_logger]
-                    except Exception:
-                        pass
-        except Exception:
-            # don't fail training if logger plumbing fails
-            pass
-
-        # Save the intended run_dir for later use
         self._run_dir = run_dir
 
-        # Optional: log code (if logger/expt supports it)
-        if hasattr(self.trainer.logger, "experiment") and hasattr(
-            self.trainer.logger.experiment, "log_code"
-        ):
-            is_gitignored = parse_gitignore(".gitignore")
-            include_fn = lambda path: path.endswith(".py") or path.endswith(".yaml")
-            try:
-                self.trainer.logger.experiment.log_code(
-                    ".", include_fn=include_fn, exclude_fn=is_gitignored
-                )
-            except Exception:
-                # don't fail training for logging errors
-                pass
+        # 2. Re-route primary CSVLogger directly to run_dir
+        if hasattr(self.trainer, "logger") and self.trainer.logger is not None:
+            if hasattr(self.trainer.logger, "_save_dir"):
+                self.trainer.logger._save_dir = str(run_dir.parent)
+            if hasattr(self.trainer.logger, "_name"):
+                self.trainer.logger._name = run_dir.name
 
         self.trainer.fit_loop.epoch_loop._should_check_val_fx = MethodType(
             _should_check_val_fx, self.trainer.fit_loop.epoch_loop
         )
 
-        if not self.config[self.config["subcommand"]]["compile_disabled"]:
+        # 3. Optional PyTorch Compile
+        if not self.config[self.config["subcommand"]].get("compile_disabled", True):
             model = torch.compile(model)
 
         # Run training
         self.trainer.fit(model, **kwargs)
 
-        # After training, run validation and persist metrics to the run directory
-        try:
-            dm = getattr(self, "datamodule", None)
-            # Run a validation pass (no grad)
-            val_results = self.trainer.validate(model, datamodule=dm)
-
-            # Write validation results into a JSON file in the run dir
-            metrics_path = Path(getattr(self, "_run_dir", "pilot_logs")) / "validation_metrics.json"
-            try:
-                with open(metrics_path, "w", encoding="utf-8") as f:
-                    json.dump(val_results, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
-
-            # Also push metrics to the logger if available
-            if hasattr(self.trainer, "logger") and hasattr(self.trainer.logger, "log_metrics"):
-                # If val_results is a list of dicts (as Lightning returns), log the first
-                to_log = val_results[0] if isinstance(val_results, (list, tuple)) and val_results else val_results
+        # 5. Flush CSVLogger to ensure metrics.csv is written
+        if hasattr(self.trainer, "logger") and self.trainer.logger:
+            if hasattr(self.trainer.logger, "save"):
+                self.trainer.logger.save()
+            if hasattr(self.trainer.logger, "experiment") and hasattr(self.trainer.logger.experiment, "flush"):
                 try:
-                    # flatten nested metrics if necessary
-                    if isinstance(to_log, dict):
-                        self.trainer.logger.log_metrics({k: float(v) for k, v in to_log.items()})
+                    self.trainer.logger.experiment.flush()
                 except Exception:
                     pass
 
+        # 6. Run Validation & Save JSON
+        try:
+            dm = getattr(self, "datamodule", None)
+            val_results = self.trainer.validate(model, datamodule=dm, verbose=False)
+
+            metrics_path = run_dir / "validation_metrics.json"
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(val_results, f, indent=2, ensure_ascii=False)
         except Exception:
-            # don't fail the whole run if validation/logging fails
             logging.exception("Validation after training failed")
 
 

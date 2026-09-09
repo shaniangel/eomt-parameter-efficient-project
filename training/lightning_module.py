@@ -191,7 +191,7 @@ class LightningModule(lightning.LightningModule):
 
         losses_all_blocks = {}
         for i, (mask_logits, class_logits) in enumerate(
-            list(zip(mask_logits_per_block, class_logits_per_block))
+                list(zip(mask_logits_per_block, class_logits_per_block))
         ):
             losses = self.criterion(
                 masks_queries_logits=mask_logits,
@@ -202,7 +202,19 @@ class LightningModule(lightning.LightningModule):
             losses = {f"{key}{block_postfix}": value for key, value in losses.items()}
             losses_all_blocks |= losses
 
-        return self.criterion.loss_total(losses_all_blocks, self.log)
+        total_loss = self.criterion.loss_total(losses_all_blocks, self.log)
+
+        # Log total training loss explicitly at step and epoch level
+        self.log(
+            "train_loss",
+            total_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
+        return total_loss
 
     def validation_step(self, batch, batch_idx=0):
         return self.eval_step(batch, batch_idx, "val")
@@ -606,8 +618,14 @@ class LightningModule(lightning.LightningModule):
 
         block_postfix = self.block_postfix(block_idx)
         name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-        self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
 
+        if hasattr(self.trainer.logger, "experiment") and hasattr(self.trainer.logger.experiment, "log"):
+            # WandbLogger path
+            import wandb
+            self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
+        else:
+            # CSVLogger or other loggers: skip W&B image logging during offline runs
+            pass
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
         factor = max(
