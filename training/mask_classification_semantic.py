@@ -96,6 +96,17 @@ class MaskClassificationSemantic(LightningModule):
         # 2) lora_enabled: attach LoRA adapters to specified backbone blocks
         # The chosen order is: freeze backbone first, then attach LoRA adapters so
         # that the original backbone weights remain frozen while LoRA params are trainable.
+
+        # 1. Load pretrained base weights BEFORE freezing and applying LoRA
+        if ckpt_path:
+            self._load_pretrained_checkpoint(ckpt_path, load_class_head=load_ckpt_class_head)
+
+        # 2. Freeze backbone parameters if requested
+        if freeze_backbone:
+            for p in self.network.encoder.backbone.parameters():
+                p.requires_grad = False
+
+        # 3. LoRA integration
         try:
             # local import to avoid circular import at module load time
             from models.lora import apply_lora_to_backbone
@@ -151,6 +162,61 @@ class MaskClassificationSemantic(LightningModule):
                 import logging
                 logging.info(f"Applied LoRA adapters to blocks {target_blocks}: approx params added={added}")
 
+    def _load_pretrained_checkpoint(self, ckpt_path: str, load_class_head: bool = True):
+        import os
+        import logging
+        import torch
+
+        if not os.path.exists(ckpt_path):
+            logging.warning(f"Checkpoint file '{ckpt_path}' not found! Proceeding with random weights.")
+            return
+
+        logging.info(f"Loading weights from {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # Unwrap dictionary if nested
+        if isinstance(ckpt, dict):
+            if "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+            elif "model" in ckpt:
+                state_dict = ckpt["model"]
+            else:
+                state_dict = ckpt
+        else:
+            state_dict = ckpt
+
+        model_state = self.state_dict()
+        new_state_dict = {}
+
+        for k, v in state_dict.items():
+            # Standardize key names to match self.network structure
+            key = k
+            if not key.startswith("network.") and f"network.{key}" in model_state:
+                key = f"network.{key}"
+            elif key.startswith("module.network.") and key[7:] in model_state:
+                key = key[7:]
+            elif key.startswith("module.") and f"network.{key[7:]}" in model_state:
+                key = f"network.{key[7:]}"
+
+            # Skip classification head if flag is set to False
+            if not load_class_head and ("class_embed" in key or "class_head" in key or "predictor.class" in key):
+                logging.info(f"Skipping head parameter from checkpoint: {k}")
+                continue
+
+            # Check shape compatibility
+            if key in model_state:
+                target_shape = model_state[key].shape
+                if v.shape != target_shape:
+                    logging.warning(
+                        f"Skipping '{k}' due to shape mismatch: checkpoint {v.shape} vs model {target_shape}"
+                    )
+                    continue
+
+            new_state_dict[key] = v
+
+        missing, unexpected = self.load_state_dict(new_state_dict, strict=False)
+        logging.info(f"Checkpoint loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+
     def eval_step(
         self,
         batch,
@@ -178,6 +244,18 @@ class MaskClassificationSemantic(LightningModule):
                 self.plot_semantic(
                     imgs[0], targets[0], logits[0], log_prefix, i, batch_idx
                 )
+
+    '''def update_metrics_semantic(self, logits, targets, layer_idx=0):
+        # 1. If logits include the 151st "no-object" class, slice it out or argmax across C
+        if logits.shape[1] == self.num_classes + 1:
+            logits = logits[:, : self.num_classes, :, :]
+
+        # 2. Convert logits to per-pixel class predictions (B, H, W)
+        preds = logits.argmax(dim=1)
+
+        # 3. Pass class indices to JaccardIndex/MeanIoU with ignore_index=255
+        # Ensure your metric instance was created with task="multiclass", num_classes=150, ignore_index=255
+        self.val_iou[layer_idx].update(preds, targets)'''
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")

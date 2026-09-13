@@ -189,24 +189,33 @@ def main(out: str | Path, dry: bool = False, sweep_name: str | None = None, prew
     }
 
     # Regime-tailored grids (Coarse screening settings)
-    regime_configs = [
+    '''regime_configs = [
         {
             "name": "full-finetune",
             "model_init": {"freeze_backbone": False, "lora_enabled": False},
-            "lrs": [1e-3],
-            "weight_decays": [0.01],
+            "lrs": [3e-5],
+            "weight_decays": [0.05],
         },
         {
             "name": "frozen-backbone",
             "model_init": {"freeze_backbone": True, "lora_enabled": False},
-            "lrs": [1e-3],
-            "weight_decays": [0.01],
+            "lrs": [3e-5],
+            "weight_decays": [0.05],
         },
         {
             "name": "local-lora",
             "model_init": {"freeze_backbone": True, "lora_enabled": True},
-            "lrs": [1e-3],
-            "weight_decays": [0.01],
+            "lrs": [3e-5],
+            "weight_decays": [0.05],
+        },
+    ]'''
+
+    regime_configs = [
+        {
+            "name": "full-finetune",
+            "model_init": {"freeze_backbone": False, "lora_enabled": False},
+            "lrs": [3e-5],
+            "weight_decays": [0.05],
         },
     ]
 

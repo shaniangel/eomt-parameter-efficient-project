@@ -26,6 +26,7 @@ class ADE20KSemantic(LightningDataModule):
         color_jitter_enabled=True,
         scale_range=(0.5, 2.0),
         check_empty_targets=True,
+        debug_overfit: bool = False,  # Enable to force train == val for debugging
     ) -> None:
         super().__init__(
             path=path,
@@ -36,6 +37,12 @@ class ADE20KSemantic(LightningDataModule):
             check_empty_targets=check_empty_targets,
         )
         self.save_hyperparameters(ignore=["_class_path"])
+        self.debug_overfit = debug_overfit
+
+        # Disable random augmentations when debugging/overfitting single images
+        if self.debug_overfit:
+            color_jitter_enabled = False
+            scale_range = (1.0, 1.0)
 
         self.transforms = Transforms(
             img_size=img_size,
@@ -100,11 +107,15 @@ class ADE20KSemantic(LightningDataModule):
             transforms=self.transforms,
             **dataset_kwargs,
         )
-        self.val_dataset = Dataset(
-            img_folder_path_in_zip=img_val_path,
-            target_folder_path_in_zip=ann_val_path,
-            **dataset_kwargs,
-        )
+        if self.debug_overfit:
+            self.val_dataset = self.train_dataset
+        else:
+            self.val_dataset = Dataset(
+                img_folder_path_in_zip=img_val_path,
+                target_folder_path_in_zip=ann_val_path,
+                transforms=self.transforms,
+                **dataset_kwargs,
+            )
 
         return self
 

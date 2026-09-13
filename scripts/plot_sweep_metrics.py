@@ -1,23 +1,29 @@
-"""Plot sweep metrics for each configuration in a single grid or overlaid plot.
+"""Plot sweep metrics for each configuration into individual plot files.
 
-This script looks for run directories under `pilot_logs/` and optionally reads a
-`sweep_summary.json` file under `runs/` to determine the run order. For each run,
-it scans for CSV metrics files produced by Lightning and plots one chosen metric.
+This script scans run directories under `pilot_logs/` and outputs a dedicated .png
+plot for each target metric inside an output folder, overlaying all runs on each plot.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
-import argparse
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SUMMARY = ROOT / "runs" / "sweep_summary.json"
-DEFAULT_OUTPUT = ROOT / "runs" / "sweep_metrics_grid.png"
+
+# List your desired metrics here.
+# Set to [] (empty list) to automatically discover and plot all logged metrics.
+TARGET_METRICS = [
+    "train_loss",
+    "train_miou",
+    "val_loss",
+    "val_miou",
+]
 
 
 def _safe_float(value):
@@ -29,102 +35,74 @@ def _safe_float(value):
         return None
 
 
-def _choose_metric_name(fieldnames):
-    keys = [k.strip() for k in fieldnames]
-    key_map = {k.lower(): k for k in keys}
+def _collect_all_metrics(run_dirs: list[Path]):
+    """Collects metric series across all runs, deduplicating points by x (epoch/step)."""
+    data_by_metric: dict[str, dict[str, tuple[list[float], list[float]]]] = {}
+    ignored_cols = {"epoch", "step", "_step", "timestamp", "created_at"}
 
-    preferred = [
-        "val_miou",
-        "mIoU",
-        "miou",
-        "val_iou",
-        "iou",
-        "val_loss",
-        "loss",
-        "train_loss",
-        "validation_loss",
-        "val_accuracy",
-        "accuracy",
-    ]
-    for p in preferred:
-        if p in key_map:
-            return key_map[p]
-
-    for k in keys:
-        lower = k.lower()
-        if lower.startswith("val_") or lower.startswith("train_") or lower.endswith("loss") or "iou" in lower or "acc" in lower:
-            return k
-
-    return keys[0] if keys else None
-
-
-def _collect_epoch_series(run_dir: Path, preferred_metric: str | None = None):
-    csv_paths = sorted(run_dir.rglob("metrics.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not csv_paths:
-        return None
-
-    for csv_path in csv_paths:
-        try:
-            with open(csv_path, "r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-        except Exception:
+    for run_dir in run_dirs:
+        run_name = run_dir.name
+        csv_paths = sorted(
+            run_dir.rglob("metrics.csv"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        if not csv_paths:
             continue
 
-        if not rows:
-            continue
-
-        fieldnames = [fn.strip() for fn in (reader.fieldnames or []) if fn]
-
-        candidates = []
-        if preferred_metric:
-            candidates = [preferred_metric]
-        else:
-            candidates = ["train_loss", "loss", "train_loss_epoch", "train_loss_step", "val_loss"]
-
-        metric_name = None
-        for cand in candidates:
-            for fn in fieldnames:
-                if fn == cand or fn.lower() == cand.lower():
-                    metric_name = fn
-                    break
-            if metric_name:
-                break
-
-        if not metric_name:
-            for fn in fieldnames:
-                if "loss" in fn.lower() or "iou" in fn.lower():
-                    metric_name = fn
-                    break
-
-        if not metric_name:
-            continue
-
-        xs, ys = [], []
-        for idx, row in enumerate(rows):
-            y = _safe_float(row.get(metric_name))
-            if y is None:
+        for csv_path in csv_paths:
+            try:
+                with open(csv_path, "r", encoding="utf-8", newline="") as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+            except Exception:
                 continue
 
-            x = _safe_float(row.get("epoch"))
-            if x is None:
-                x = _safe_float(row.get("step"))
-            if x is None:
-                x = float(idx)
+            if not rows:
+                continue
 
-            xs.append(x)
-            ys.append(y)
+            fieldnames = [fn.strip() for fn in (reader.fieldnames or []) if fn]
+            metric_cols = [f for f in fieldnames if f.lower() not in ignored_cols]
 
-        if len(ys) >= 1:
-            return xs, ys, metric_name
+            for metric_name in metric_cols:
+                xy_map: dict[float, float] = {}
+                for idx, row in enumerate(rows):
+                    y = _safe_float(row.get(metric_name))
+                    if y is None:
+                        continue
 
-    return None
+                    x = _safe_float(row.get("epoch"))
+                    if x is None:
+                        x = _safe_float(row.get("step"))
+                    if x is None:
+                        x = float(idx)
+
+                    xy_map[x] = y
+
+                if xy_map:
+                    sorted_xs = sorted(xy_map.keys())
+                    sorted_ys = [xy_map[k] for k in sorted_xs]
+
+                    if metric_name not in data_by_metric:
+                        data_by_metric[metric_name] = {}
+                    data_by_metric[metric_name][run_name] = (sorted_xs, sorted_ys)
+
+            break
+
+    return data_by_metric
 
 
-def _discover_run_dirs(root: Path, pilot_root: Path | None = None, run_name: str | None = None, run_dir: Path | None = None, latest: bool = False):
+def _discover_run_dirs(
+    root: Path,
+    pilot_root: Path | None = None,
+    run_name: str | None = None,
+    run_dir: Path | None = None,
+    latest: bool = False,
+):
     pilot_root = (pilot_root or (root / "pilot_logs")).resolve()
 
-    summary_candidates = [pilot_root.parent / "runs" / "sweep_summary.json", (root / "runs" / "sweep_summary.json").resolve()]
+    summary_candidates = [
+        pilot_root.parent / "runs" / "sweep_summary.json",
+        (root / "runs" / "sweep_summary.json").resolve(),
+    ]
     summary_path = None
     for p in summary_candidates:
         if p.exists():
@@ -148,7 +126,11 @@ def _discover_run_dirs(root: Path, pilot_root: Path | None = None, run_name: str
                             cand = Path(run_dir_recorded).resolve()
                             if cand.exists() and cand.is_dir():
                                 return [cand]
-                        matches = sorted(pilot_root.glob(f"{run_name}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                        matches = sorted(
+                            pilot_root.glob(f"{run_name}*"),
+                            key=lambda p: p.stat().st_mtime,
+                            reverse=True,
+                        )
                         if matches:
                             return [matches[0].resolve()]
             except Exception:
@@ -156,7 +138,11 @@ def _discover_run_dirs(root: Path, pilot_root: Path | None = None, run_name: str
         return []
 
     if latest:
-        candidates = sorted([p for p in pilot_root.glob("*") if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+        candidates = sorted(
+            [p for p in pilot_root.glob("*") if p.is_dir()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
         return candidates[:1]
 
     run_dirs = []
@@ -174,7 +160,11 @@ def _discover_run_dirs(root: Path, pilot_root: Path | None = None, run_name: str
                         run_dirs.append(cand)
                         continue
 
-                matches = sorted(pilot_root.glob(f"{run_name}*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                matches = sorted(
+                    pilot_root.glob(f"{run_name}*"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
                 if matches:
                     run_dirs.append(matches[0].resolve())
                 else:
@@ -201,123 +191,129 @@ def _discover_run_dirs(root: Path, pilot_root: Path | None = None, run_name: str
     return deduped
 
 
-def _plot_grid(run_dirs, out_path: Path, metric: str | None = None):
+def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None = None):
     if not run_dirs:
         raise FileNotFoundError("No run folders with metrics were found under pilot_logs/.")
 
-    rows = max(1, int(len(run_dirs) ** 0.5))
-    cols = (len(run_dirs) + rows - 1) // rows
+    data_by_metric = _collect_all_metrics(run_dirs)
 
-    summary_path = out_path.parent / "sweep_summary.json"
-    summary_info = {}
-    if summary_path.exists():
-        try:
-            data = json.loads(summary_path.read_text(encoding="utf-8"))
-            for entry in data:
-                run_name = entry.get("run_name")
-                if run_name:
-                    summary_info[run_name] = entry
-        except Exception:
-            summary_info = {}
+    # Filter by TARGET_METRICS using exact matching first
+    if TARGET_METRICS:
+        filtered_data = {}
+        for target in TARGET_METRICS:
+            target_norm = target.lower().replace("/", "_")
+            matched_key = None
 
-    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), squeeze=False)
-    flat_axes = axes.flatten()
+            for m in data_by_metric.keys():
+                m_norm = m.lower().replace("/", "_")
+                if m_norm == target_norm:
+                    matched_key = m
+                    break
 
-    for idx, run_dir in enumerate(run_dirs):
-        ax = flat_axes[idx]
-        run_name = run_dir.name
-        title = run_name
-        series = _collect_epoch_series(run_dir, preferred_metric=metric)
+            if not matched_key:
+                for m in data_by_metric.keys():
+                    m_norm = m.lower().replace("/", "_")
+                    if m_norm in (f"{target_norm}_epoch", f"{target_norm}_step"):
+                        matched_key = m
+                        break
 
-        if series is None:
-            msg = "No metric curve\nfound"
-            ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(title, fontsize=8)
-            ax.set_axis_off()
-            continue
+            if matched_key:
+                filtered_data[matched_key] = data_by_metric[matched_key]
+            else:
+                print(
+                    f"Warning: '{target}' not found in logged metrics. Available columns: {list(data_by_metric.keys())}"
+                )
 
-        xs, ys, metric_name = series
-        ax.plot(xs, ys, marker="o", linewidth=2)
-        ax.set_title(title, fontsize=8)
-        ax.set_xlabel("epoch")
-        ax.set_ylabel(metric_name)
-        ax.grid(alpha=0.25)
+        data_by_metric = filtered_data
 
-    for i in range(len(run_dirs), len(flat_axes)):
-        flat_axes[i].axis("off")
+    if metric_filter:
+        data_by_metric = {
+            m: runs for m, runs in data_by_metric.items() if metric_filter.lower() in m.lower()
+        }
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-    print(f"Saved grid plot to: {out_path}")
-
-
-def _plot_overlay(run_dirs, out_path: Path, metric: str | None = None):
-    if not run_dirs:
-        raise FileNotFoundError("No run folders with metrics were found under pilot_logs/.")
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    plotted_any = False
-    metric_name_used = metric or "train_loss"
-
-    for run_dir in run_dirs:
-        run_name = run_dir.name
-        series = _collect_epoch_series(run_dir, preferred_metric=metric)
-        if series is None:
-            continue
-        xs, ys, metric_name = series
-        metric_name_used = metric_name
-        ax.plot(xs, ys, marker="o", linewidth=2, label=run_name)
-        plotted_any = True
-
-    if not plotted_any:
-        print("No valid metric series found across any runs to overlay.")
-        plt.close(fig)
+    if not data_by_metric:
+        print("No valid metric series found matching your criteria.")
         return
 
-    ax.set_title(f"Sweep Comparison ({metric_name_used})", fontsize=12)
-    ax.set_xlabel("epoch")
-    ax.set_ylabel(metric_name_used)
-    ax.grid(alpha=0.25)
-    ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved overlay plot to: {out_path}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for metric_name, run_data in data_by_metric.items():
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        for run_name, (xs, ys) in run_data.items():
+            ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.5, label=run_name)
+
+        clean_title = metric_name.replace("losses/", "").replace("metrics/", "")
+        ax.set_title(clean_title, fontsize=12, fontweight="bold")
+        ax.set_xlabel("epoch", fontsize=10)
+        ax.set_ylabel("value", fontsize=10)
+        ax.grid(True, alpha=0.3, linestyle="--")
+        ax.legend(fontsize=9, loc="best")
+
+        fig.tight_layout()
+
+        # Sanitize filename (replaces slashes and spaces for safe file saving)
+        file_name = (
+            metric_name.lower()
+            .replace("/", "_")
+            .replace("\\", "_")
+            .replace(" ", "_")
+            + ".png"
+        )
+        metric_out_path = out_dir / file_name
+
+        fig.savefig(metric_out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved metric plot to: {metric_out_path}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=ROOT)
-    parser.add_argument("--pilot-logs", type=Path, default=ROOT / "pilot_logs", help="Root folder containing run folders")
-    parser.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--pilot-logs",
+        type=Path,
+        default=ROOT / "pilot_logs",
+        help="Root folder containing run folders",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Custom output folder path (defaults to <pilot-logs>/../runs/sweep_plots/)",
+    )
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--latest", action="store_true")
-    parser.add_argument("--metric", type=str, default=None, help="Metric column name to plot")
-    parser.add_argument("--overlay", action="store_true", help="Plot all runs overlaid on a single plot with a legend")
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default=None,
+        help="Optional metric name filter to restrict plotted metrics further",
+    )
     args = parser.parse_args()
 
     root = args.root.resolve()
     pilot_root = args.pilot_logs.resolve()
 
-    if args.out.resolve() == DEFAULT_OUTPUT.resolve():
-        filename = "sweep_metrics_overlay.png" if args.overlay else "sweep_metrics_grid.png"
-        out = (pilot_root.parent / "runs" / filename).resolve()
+    # Automatically set output directory inside sweep directory's runs/ folder
+    if args.out is None:
+        out_dir = (pilot_root.parent / "sweep_plots").resolve()
     else:
-        out = args.out.resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
+        out_dir = args.out.resolve()
 
-    run_dirs = _discover_run_dirs(root, pilot_root=pilot_root, run_name=args.run_name, run_dir=args.run_dir, latest=args.latest)
+    run_dirs = _discover_run_dirs(
+        root,
+        pilot_root=pilot_root,
+        run_name=args.run_name,
+        run_dir=args.run_dir,
+        latest=args.latest,
+    )
     if not run_dirs:
         print(f"No run directories found under {pilot_root}.")
         return 1
 
-    if args.overlay:
-        _plot_overlay(run_dirs, out, metric=args.metric)
-    else:
-        _plot_grid(run_dirs, out, metric=args.metric)
+    _plot_individual_metrics(run_dirs, out_dir, metric_filter=args.metric)
     return 0
 
 

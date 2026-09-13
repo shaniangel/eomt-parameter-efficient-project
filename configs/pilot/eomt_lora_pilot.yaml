@@ -1,10 +1,9 @@
 trainer:
-  accelerator: auto  # choose CPU or GPU automatically
+  accelerator: auto
   devices: 1
-  precision: 32  # default to 32-bit to be safe on CPU; override on GPU via CLI if desired
-  max_epochs: 10
-  limit_train_batches: 1
-  limit_val_batches: 1
+  precision: 32
+  max_epochs: 200
+  overfit_batches: 1
   num_sanity_val_steps: 0
   log_every_n_steps: 1
   logger:
@@ -21,7 +20,8 @@ trainer:
 model:
   class_path: training.mask_classification_semantic.MaskClassificationSemantic
   init_args:
-    attn_mask_annealing_enabled: true
+    ckpt_path: null
+    attn_mask_annealing_enabled: false  # Disabled for 10-step pilot run
     attn_mask_annealing_start_steps: [6520, 13040, 19560, 26080]
     attn_mask_annealing_end_steps: [13040, 19560, 26080, 32600]
     # LoRA and freezing options.
@@ -51,5 +51,6 @@ data:
     batch_size: 1
     num_workers: 0
     img_size: [256, 256]
+    debug_overfit: true
 
 compile_disabled: true
