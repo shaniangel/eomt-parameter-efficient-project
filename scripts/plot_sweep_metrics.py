@@ -23,6 +23,7 @@ TARGET_METRICS = [
     "train_miou",
     "val_loss",
     "val_miou",
+    "metrics/val_iou_all"
 ]
 
 

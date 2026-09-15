@@ -244,19 +244,6 @@ class MaskClassificationSemantic(LightningModule):
                 self.plot_semantic(
                     imgs[0], targets[0], logits[0], log_prefix, i, batch_idx
                 )
-
-    '''def update_metrics_semantic(self, logits, targets, layer_idx=0):
-        # 1. If logits include the 151st "no-object" class, slice it out or argmax across C
-        if logits.shape[1] == self.num_classes + 1:
-            logits = logits[:, : self.num_classes, :, :]
-
-        # 2. Convert logits to per-pixel class predictions (B, H, W)
-        preds = logits.argmax(dim=1)
-
-        # 3. Pass class indices to JaccardIndex/MeanIoU with ignore_index=255
-        # Ensure your metric instance was created with task="multiclass", num_classes=150, ignore_index=255
-        self.val_iou[layer_idx].update(preds, targets)'''
-
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
 

@@ -212,9 +212,15 @@ def main(out: str | Path, dry: bool = False, sweep_name: str | None = None, prew
 
     regime_configs = [
         {
-            "name": "full-finetune",
-            "model_init": {"freeze_backbone": False, "lora_enabled": False},
-            "lrs": [3e-5],
+            "name": "full-finetune1",
+            "model_init": {"freeze_backbone": True, "lora_enabled": False},
+            "lrs": [5e-5],
+            "weight_decays": [0.05],
+        },
+        {
+            "name": "full-finetune2",
+            "model_init": {"freeze_backbone": True, "lora_enabled": True},
+            "lrs": [5e-5],
             "weight_decays": [0.05],
         },
     ]
