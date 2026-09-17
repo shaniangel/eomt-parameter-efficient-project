@@ -99,18 +99,6 @@ class LightningModule(lightning.LightningModule):
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
 
-        # Initialize separate trackers for train and val
-        self.train_miou_metric = MulticlassJaccardIndex(
-            num_classes=self.num_classes, ignore_index=255, zero_division=1.0
-        )
-        self.val_miou_metric = MulticlassJaccardIndex(
-            num_classes=self.num_classes, ignore_index=255, zero_division=1.0
-        )
-
-        self.id_to_contiguous = {
-            dataset_id: i for i, dataset_id in enumerate(range(1, num_classes + 1))
-        }
-
     def configure_optimizers(self):
         encoder_param_names = {
             n for n, _ in self.network.encoder.backbone.named_parameters()
@@ -118,42 +106,37 @@ class LightningModule(lightning.LightningModule):
         backbone_param_groups = []
         other_param_groups = []
         backbone_blocks = len(self.network.encoder.backbone.blocks)
+        block_i = backbone_blocks
 
         l2_blocks = torch.arange(
             backbone_blocks - self.network.num_blocks, backbone_blocks
         ).tolist()
 
-        # Iterate over parameters to construct param groups
         for name, param in reversed(list(self.named_parameters())):
-            if not param.requires_grad:
-                # skip frozen params (e.g., frozen backbone when using LoRA)
-                continue
-
             lr = self.lr
 
             if name.replace("network.encoder.backbone.", "") in encoder_param_names:
                 name_list = name.split(".")
 
                 is_block = False
-                block_i = None
-
                 for i, key in enumerate(name_list):
                     if key == "blocks":
                         block_i = int(name_list[i + 1])
                         is_block = True
 
-                if is_block:
+                if is_block or block_i == 0:
                     lr *= self.llrd ** (backbone_blocks - 1 - block_i)
-                    if self.lr_mult != 1.0:
-                        lr *= self.lr_mult
+
+                elif (is_block or block_i == 0) and self.lr_mult != 1.0:
+                    lr *= self.lr_mult
 
                 if "backbone.norm" in name:
                     lr = self.lr
 
                 if (
-                        is_block
-                        and (block_i in l2_blocks)
-                        and ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))
+                    is_block
+                    and (block_i in l2_blocks)
+                    and ((not self.llrd_l2_enabled) or (self.lr_mult != 1.0))
                 ):
                     lr = self.lr
 
@@ -165,18 +148,10 @@ class LightningModule(lightning.LightningModule):
                     {"params": [param], "lr": self.lr, "name": name}
                 )
 
-        # Log parameter counts for diagnostics: total vs trainable
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logging.info(
-            f"Parameters: total={total_params:,}, trainable={trainable_params:,} "
-            f"({100 * trainable_params / max(1, total_params):.2f}%)"
-        )
-
         param_groups = backbone_param_groups + other_param_groups
         optimizer = AdamW(param_groups, weight_decay=self.weight_decay)
 
-        # Skip polynomial schedule for short debugging/overfitting runs
+        # override scheduler for quick testing. remove this in final version!!!
         if self.trainer.estimated_stepping_batches <= 500:
             return optimizer
 
@@ -198,49 +173,9 @@ class LightningModule(lightning.LightningModule):
         }
 
     def forward(self, imgs):
-        # Handle tuple/list inputs and resize per-item if shapes vary
-        if isinstance(imgs, (tuple, list)):
-            resized_imgs = []
-            for img in imgs:
-                if img.shape[-2:] != tuple(self.img_size):
-                    img = torch.nn.functional.interpolate(
-                        img.unsqueeze(0),
-                        size=self.img_size,
-                        mode="bilinear",
-                        align_corners=False,
-                    ).squeeze(0)
-                resized_imgs.append(img)
-            imgs = torch.stack(resized_imgs)
-
         x = imgs / 255.0
 
-        # Ensure batch tensor matches target image dimensions
-        if x.shape[-2:] != tuple(self.img_size):
-            x = torch.nn.functional.interpolate(
-                x,
-                size=self.img_size,
-                mode="bilinear",
-                align_corners=False,
-            )
-
         return self.network(x)
-
-    def _predict_class_map(self, mask_logits, class_logits, target_shape):
-        """Convert query logits into a discrete class prediction map (B, H, W)."""
-        # Apply softmax over ALL classes (including background), THEN slice foreground classes
-        class_probs = class_logits.softmax(dim=-1)[..., : self.num_classes]
-        mask_probs = mask_logits.sigmoid()
-
-        pred_masks = torch.einsum("bqc,bqhw->bchw", class_probs, mask_probs)
-
-        if pred_masks.shape[-2:] != target_shape:
-            pred_masks = torch.nn.functional.interpolate(
-                pred_masks,
-                size=target_shape,
-                mode="bilinear",
-                align_corners=False,
-            )
-        return pred_masks.argmax(dim=1)
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
@@ -249,7 +184,7 @@ class LightningModule(lightning.LightningModule):
 
         losses_all_blocks = {}
         for i, (mask_logits, class_logits) in enumerate(
-                zip(mask_logits_per_block, class_logits_per_block)
+            list(zip(mask_logits_per_block, class_logits_per_block))
         ):
             losses = self.criterion(
                 masks_queries_logits=mask_logits,
@@ -257,167 +192,15 @@ class LightningModule(lightning.LightningModule):
                 targets=targets,
             )
             block_postfix = self.block_postfix(i)
-            losses = {f"{key}{block_postfix}": value for key, value in losses.items()}
+            losses = {
+                f"{key}{block_postfix}": value for key, value in losses.items()
+            }
             losses_all_blocks |= losses
 
-        total_loss = self.criterion.loss_total(losses_all_blocks, self.log)
-
-        self.log(
-             "train_loss",
-             total_loss,
-             on_step=False,
-             on_epoch=True,
-             prog_bar=True,
-             logger=True,
-        )
-
-        with torch.no_grad():
-            target_masks = self._targets_to_dense_map(
-                targets,
-                self.device,
-                self.num_classes,
-            )
-            preds = self._predict_class_map(
-                mask_logits_per_block[-1],
-                class_logits_per_block[-1],
-                target_masks.shape[-2:],
-            )
-            self.train_miou_metric.update(preds, target_masks)
-
-        return total_loss
-
-    def on_train_epoch_end(self):
-        train_miou = self.train_miou_metric.compute()
-        self.log("train_miou", train_miou, prog_bar=True)
-        self.train_miou_metric.reset()
-
-    def _debug_miou(self, preds, target_masks, targets, mask_logits, class_logits):
-        """Temporary diagnostic logger to expose mIoU calculation mismatches."""
-        print("\n" + "=" * 60)
-        print(" [mIoU Diagnostic Report]")
-        print(f"  - Preds shape: {preds.shape} | unique values: {preds.unique().tolist()}")
-        print(f"  - Target masks shape: {target_masks.shape} | unique values: {target_masks.unique().tolist()}")
-
-        raw_labels = [t["labels"].tolist() for t in targets]
-        print(f"  - Raw dataset targets['labels']: {raw_labels}")
-        print(f"  - id_to_contiguous dict: {self.id_to_contiguous}")
-
-        print(
-            f"  - Class logits shape: {class_logits.shape} (Range: [{class_logits.min():.2f}, {class_logits.max():.2f}])")
-        print(f"  - Mask logits shape: {mask_logits.shape} (Range: [{mask_logits.min():.2f}, {mask_logits.max():.2f}])")
-
-        valid_mask = target_masks != 255
-        if valid_mask.sum() > 0:
-            correct = (preds[valid_mask] == target_masks[valid_mask]).sum().item()
-            total = valid_mask.sum().item()
-            print(f"  - Raw Pixel Accuracy (excl. 255): {100.0 * correct / total:.2f}% ({correct}/{total})")
-        else:
-            print("  - WARNING: All target pixels are set to ignore_index (255)!")
-        print("=" * 60 + "\n")
+        return self.criterion.loss_total(losses_all_blocks, self.log)
 
     def validation_step(self, batch, batch_idx=0):
-        imgs, targets = batch
-        mask_logits_per_block, class_logits_per_block = self(imgs)
-
-        target_masks = self._targets_to_dense_map(
-            targets,
-            self.device,
-            self.num_classes,
-        )
-        target_shape = target_masks.shape[-2:]
-
-        preds = self._predict_class_map(
-            mask_logits_per_block[-1],
-            class_logits_per_block[-1],
-            target_shape,
-        )
-
-        if batch_idx == 0:
-            self._debug_miou(
-                preds,
-                target_masks,
-                targets,
-                mask_logits_per_block[-1],
-                class_logits_per_block[-1],
-            )
-
-        self.val_miou_metric.update(preds, target_masks)
-        self.log(
-            "val_miou",
-            self.val_miou_metric,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
-        if hasattr(self, "metrics") and isinstance(self.metrics, nn.ModuleList):
-            num_blocks = len(mask_logits_per_block)
-            for i, metric in enumerate(self.metrics):
-                if i < num_blocks:
-                    block_preds = self._predict_class_map(
-                        mask_logits_per_block[i],
-                        class_logits_per_block[i],
-                        target_shape,
-                    )
-                    metric.update(block_preds, target_masks)
-                else:
-                    metric.update(preds, target_masks)
-
-        # Accumulate losses across all blocks matching training_step
-        losses_all_blocks = {}
-        for i, (mask_logits, class_logits) in enumerate(
-                zip(mask_logits_per_block, class_logits_per_block)
-        ):
-            losses = self.criterion(
-                masks_queries_logits=mask_logits,
-                class_queries_logits=class_logits,
-                targets=targets,
-            )
-            block_postfix = self.block_postfix(i)
-            losses = {f"{key}{block_postfix}": value for key, value in losses.items()}
-            losses_all_blocks |= losses
-
-        val_loss = self.criterion.loss_total(losses_all_blocks, self.log)
-        self.log(
-            "val_loss",
-            val_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
-        return val_loss
-
-    def on_validation_epoch_end(self):
-        if hasattr(self, "metrics") and isinstance(self.metrics, nn.ModuleList):
-            block_names = ["block_-4", "block_-3", "block_-2", "block_-1", "all"]
-            for idx, metric in enumerate(self.metrics):
-                key_name = block_names[idx] if idx < len(block_names) else f"block_{idx}"
-                self.log(f"metrics/val_iou_{key_name}", metric, sync_dist=True)
-
-    def _targets_to_dense_map(self, targets, device, num_classes, id_to_contiguous=None):
-        batch_size = len(targets)
-        h, w = targets[0]["masks"].shape[-2:]
-        dense_map = torch.full((batch_size, h, w), fill_value=255, dtype=torch.long, device=device)
-
-        for b, target in enumerate(targets):
-            labels = target["labels"].long()
-            masks = target["masks"]
-
-            # Convert using dictionary only if provided and keys match
-            if id_to_contiguous is not None:
-                labels = torch.tensor(
-                    [id_to_contiguous.get(int(l), int(l)) for l in labels],
-                    device=device,
-                    dtype=torch.long,
-                )
-
-            for mask, label in zip(masks, labels):
-                dense_map[b][mask.bool()] = label
-
-        return dense_map
+        return self.eval_step(batch, batch_idx, "val")
 
     def mask_annealing(self, start_iter, current_iter, final_iter):
         device = self.device
@@ -461,6 +244,8 @@ class LightningModule(lightning.LightningModule):
                     validate_args=False,
                     ignore_index=ignore_idx,
                     average=None,
+                    # For scaling problem in mIoU calculation, ignore absent classes instead of treating them as 0.0
+                    zero_division=float("nan")
                 )
                 for _ in range(num_blocks)
             ]
@@ -627,11 +412,22 @@ class LightningModule(lightning.LightningModule):
                         f"metrics/{log_prefix}_iou_class_{class_idx}{block_postfix}",
                         iou,
                     )
-
-            iou_all = float(iou_per_class.mean())
+            # handle NaNs for absent classes by treating them as 0.0
+            iou_all = float(iou_per_class.nan_to_num(0.0).mean())
             self.log(
                 f"metrics/{log_prefix}_iou_all{block_postfix}",
                 iou_all,
+            )
+
+            # mIoU over present classes only (ignores NaNs for absent classes)
+            valid_ious = iou_per_class[~torch.isnan(iou_per_class)]
+            iou_present = float(valid_ious.mean()) if len(valid_ious) > 0 else 0.0
+
+            # Log present-class mIoU directly to the progress bar
+            self.log(
+                f"metrics/{log_prefix}_iou_present{block_postfix}",
+                iou_present,
+                prog_bar=True,
             )
 
     def _on_eval_epoch_end_instance(self, log_prefix):
@@ -818,14 +614,9 @@ class LightningModule(lightning.LightningModule):
 
         block_postfix = self.block_postfix(block_idx)
         name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-
-        if hasattr(self.trainer.logger, "experiment") and hasattr(self.trainer.logger.experiment, "log"):
-            # WandbLogger path
-            import wandb
+        if hasattr(self.trainer.logger.experiment, "log"):
             self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
-        else:
-            # CSVLogger or other loggers: skip W&B image logging during offline runs
-            pass
+
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
         factor = max(
