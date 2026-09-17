@@ -1,9 +1,8 @@
-"""Plot sweep metrics and generate clean comparison CSV for each configuration.
+"""Plot sweep metrics and generate clean comparison CSV.
 
-This script scans run directories under `pilot_logs/`, outputs a dedicated .png
-plot for each target metric overlaying all runs, extracts static efficiency
-stats (FLOPs, Params, FPS) from run configs/summaries, filters out parameter-level
-learning rate noise, and exports a clean `comparison.csv`.
+This script scans run directories under `pilot_logs/`, generates dedicated .png
+plots overlaying all runs for target metrics, extracts static model efficiency stats
+(Params, GFLOPs) and final evaluation metrics, and exports a clean `comparison.csv`.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Target metrics for PNG plots
+# Metrics to generate PNG line plots for
 TARGET_METRICS = [
     "metrics/val_iou_all",
     "metrics/val_iou_present",
@@ -26,8 +25,9 @@ TARGET_METRICS = [
     "losses/train_loss_total",
 ]
 
-# Patterns to completely ignore in comparison.csv to prevent column bloating
+# Patterns to filter out parameter-level noise from comparison.csv
 IGNORE_PREFIXES = ("lr-", "lr/", "lr_")
+EFFICIENCY_KEYWORDS = ("param", "flop", "mac", "fps", "throughput", "gflop")
 
 
 def _safe_float(value):
@@ -40,7 +40,6 @@ def _safe_float(value):
 
 
 def _flatten_dict(d: dict, parent_key: str = "", sep: str = "/") -> dict:
-    """Recursively flattens nested dictionaries to discover deeply nested configs."""
     items = []
     for k, v in d.items():
         new_key = f"{parent_key}{sep}{k}" if parent_key else k
@@ -277,11 +276,11 @@ def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None 
 
         fig.savefig(metric_out_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved metric plot to: {metric_out_path}")
+        print(f"Saved metric plot: {metric_out_path}")
 
 
 def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
-    """Parses static efficiency stats and final metric values, filtering out LR noise."""
+    """Parses static efficiency stats and final metric values into comparison.csv."""
     summary_rows = []
     ignored_time_cols = {"epoch", "step", "_step", "timestamp", "created_at"}
 
@@ -289,23 +288,23 @@ def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
         run_name = run_dir.name
         run_info = {"run_name": run_name}
 
-        # 1. Parse static attributes from all JSON files in the run directory recursively
+        # 1. Safe JSON parsing (handles 0-byte or corrupt JSON files gracefully)
         for json_file in run_dir.rglob("*.json"):
             try:
-                data = json.loads(json_file.read_text(encoding="utf-8"))
+                content = json_file.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                data = json.loads(content)
                 if isinstance(data, dict):
                     flat_data = _flatten_dict(data)
                     for k, v in flat_data.items():
                         k_lower = k.lower()
-                        # Extract hardware / static specs specifically
-                        if any(s in k_lower for s in ["param", "flop", "gflop", "fps", "throughput", "latency"]):
-                            run_info[k] = v
-                        elif not k.startswith(IGNORE_PREFIXES) and len(k_lower.split("/")) <= 2:
+                        if any(kw in k_lower for kw in EFFICIENCY_KEYWORDS):
                             run_info[k] = v
             except Exception:
                 pass
 
-        # 2. Extract logged metrics from metrics.csv, filtering out lr- parameter noise
+        # 2. Extract logged metrics from metrics.csv, filtering out LR parameter noise
         csv_paths = sorted(
             run_dir.rglob("metrics.csv"), key=lambda p: p.stat().st_mtime, reverse=True
         )
@@ -320,7 +319,6 @@ def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
                     for col in fieldnames:
                         col_lower = col.lower()
 
-                        # Skip epoch/step and all LR noise columns
                         if col_lower in ignored_time_cols or col.startswith(IGNORE_PREFIXES):
                             continue
 
@@ -334,8 +332,8 @@ def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
                         if not vals:
                             continue
 
-                        # Check if metric represents static efficiency stats
-                        if any(s in col_lower for s in ["fps", "flop", "param", "gflop", "throughput"]):
+                        # Treat static efficiency metrics distinctly from epoch-varying losses
+                        if any(kw in col_lower for kw in EFFICIENCY_KEYWORDS):
                             run_info[col] = vals[-1]
                         else:
                             run_info[f"{col} (final)"] = vals[-1]
@@ -351,27 +349,19 @@ def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     comparison_csv_path = out_dir / "comparison.csv"
 
-    # Standardize and order CSV columns logically
+    # Order columns logically: Run Name -> Efficiency -> Primary Metrics -> Intermediate Block Metrics
     all_keys = set()
     for row in summary_rows:
         all_keys.update(row.keys())
 
     all_keys.discard("run_name")
 
-    # Group 1: Efficiency & static metrics (FLOPs, FPS, Params)
     efficiency_keys = sorted(
-        [k for k in all_keys if any(p in k.lower() for p in ["param", "gflop", "flop", "fps", "throughput", "latency"])]
+        [k for k in all_keys if any(kw in k.lower() for kw in EFFICIENCY_KEYWORDS)]
     )
-
-    # Group 2: Primary evaluation & loss metrics
     primary_metrics = sorted(
-        [
-            k for k in all_keys
-            if k not in efficiency_keys and "block_" not in k.lower()
-        ]
+        [k for k in all_keys if k not in efficiency_keys and "block_" not in k.lower()]
     )
-
-    # Group 3: Secondary block-level intermediate metrics
     block_metrics = sorted([k for k in all_keys if "block_" in k.lower()])
 
     fieldnames = ["run_name"] + efficiency_keys + primary_metrics + block_metrics
@@ -382,7 +372,7 @@ def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
         for row in summary_rows:
             writer.writerow({fn: row.get(fn, "") for fn in fieldnames})
 
-    print(f"Saved model comparison CSV to: {comparison_csv_path}")
+    print(f"Saved comparison CSV: {comparison_csv_path}")
 
 
 def main():
@@ -403,7 +393,12 @@ def main():
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--latest", action="store_true")
-    parser.add_argument("--metric", type=str, default=None)
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default=None,
+        help="Optional metric name filter",
+    )
     args = parser.parse_args()
 
     root = args.root.resolve()

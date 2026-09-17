@@ -4,10 +4,10 @@ trainer:
   precision: 32
   max_epochs: 10            # Run 1 epoch total
   #overfit_batches: 1
-  limit_train_batches: 20   # Run exactly 1 training batch
-  limit_val_batches: 10     # Run exactly 1 validation batch
+  limit_train_batches: 3   # Run exactly 1 training batch
+  limit_val_batches: 1     # Run exactly 1 validation batch
   check_val_every_n_epoch: 1
-  log_every_n_steps: 10     # Log every step so metrics record immediately
+  log_every_n_steps: 1     # Log every step so metrics record immediately
   logger:
     class_path: lightning.pytorch.loggers.CSVLogger
     init_args:
@@ -45,7 +45,7 @@ data:
   class_path: datasets.ade20k_semantic.ADE20KSemantic
   init_args:
     path: data/ade20k
-    batch_size: 2         # 1 image per batch
+    batch_size: 1         # 1 image per batch
     num_workers: 0        # Eliminates multiprocessing overhead on CPU
     img_size: [256, 256]
 

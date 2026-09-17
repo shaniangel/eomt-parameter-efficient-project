@@ -89,9 +89,9 @@ def main():
         default=[1.0],
         help="Training dataset fractions to sweep over (e.g., 0.05 0.25 1.0)",
     )
-    # ADD THESE TWO ARGUMENTS:
-    parser.add_argument("--limit-train-batches", type=int, default=20, help="Number of train batches")
-    parser.add_argument("--limit-val-batches", type=int, default=10, help="Number of val batches")
+    # For some reason these limit batches override the .yaml, fix this!!!
+    parser.add_argument("--limit-train-batches", type=int, default=1, help="Number of train batches")
+    parser.add_argument("--limit-val-batches", type=int, default=1, help="Number of val batches")
     args = parser.parse_args()
 
     if args.sweep_name:

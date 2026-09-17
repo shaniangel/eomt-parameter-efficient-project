@@ -33,6 +33,8 @@ import numpy as np
 from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
+import json
+from pathlib import Path
 
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
 
@@ -98,6 +100,55 @@ class LightningModule(lightning.LightningModule):
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
+
+    # Record model parameter statistics and estimated GFLOPs at the start of training
+    def on_fit_start(self):
+        super().on_fit_start()
+
+        # 1. Compute parameter statistics
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+
+        metrics = {
+            "model/params_total": float(total_params),
+            "model/params_trainable": float(trainable_params),
+            "model/params_frozen": float(frozen_params),
+        }
+
+        # 2. Estimate FLOPs/GFLOPs safely using fvcore (if available)
+        gflops = None
+        try:
+            from fvcore.nn import FlopCountAnalysis
+            dummy_img = torch.zeros(1, 3, *self.img_size, device=self.device)
+            flops = FlopCountAnalysis(self.network, dummy_img).total()
+            gflops = flops / 1e9
+            metrics["model/gflops"] = float(gflops)
+        except Exception:
+            pass
+
+        # 3. Log directly to the active logger at step 0
+        if self.logger:
+            self.logger.log_metrics(metrics, step=0)
+
+        # 4. Save JSON summary inside the run log folder
+        if self.trainer.log_dir and self.trainer.is_global_zero:
+            log_dir = Path(self.trainer.log_dir)
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            stats = {
+                "total_params": total_params,
+                "trainable_params": trainable_params,
+                "frozen_params": frozen_params,
+            }
+            if gflops is not None:
+                stats["gflops"] = gflops
+
+            json_path = log_dir / "efficiency_stats.json"
+            try:
+                json_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+            except Exception as e:
+                logging.warning(f"Failed to write efficiency_stats.json: {e}")
 
     def configure_optimizers(self):
         encoder_param_names = {
