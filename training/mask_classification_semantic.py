@@ -244,6 +244,7 @@ class MaskClassificationSemantic(LightningModule):
                 self.plot_semantic(
                     imgs[0], targets[0], logits[0], log_prefix, i, batch_idx
                 )
+
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
 

@@ -1,7 +1,8 @@
-"""Plot sweep metrics for each configuration into individual plot files.
+"""Plot sweep metrics and generate clean comparison CSV.
 
-This script scans run directories under `pilot_logs/` and outputs a dedicated .png
-plot for each target metric inside an output folder, overlaying all runs on each plot.
+This script scans run directories under `pilot_logs/`, generates dedicated .png
+plots overlaying all runs for target metrics, extracts static model efficiency stats
+(Params, GFLOPs) and final evaluation metrics, and exports a clean `comparison.csv`.
 """
 from __future__ import annotations
 
@@ -16,15 +17,17 @@ import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# List your desired metrics here.
-# Set to [] (empty list) to automatically discover and plot all logged metrics.
+# Metrics to generate PNG line plots for
 TARGET_METRICS = [
-    "train_loss",
-    "train_miou",
-    "val_loss",
-    "val_miou",
-    "metrics/val_iou_all"
+    "metrics/val_iou_all",
+    "metrics/val_iou_present",
+    "losses/train_loss_cross_entropy",
+    "losses/train_loss_total",
 ]
+
+# Patterns to filter out parameter-level noise from comparison.csv
+IGNORE_PREFIXES = ("lr-", "lr/", "lr_")
+EFFICIENCY_KEYWORDS = ("param", "flop", "mac", "fps", "throughput", "gflop")
 
 
 def _safe_float(value):
@@ -36,8 +39,19 @@ def _safe_float(value):
         return None
 
 
+def _flatten_dict(d: dict, parent_key: str = "", sep: str = "/") -> dict:
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep=sep).items())
+        elif isinstance(v, (int, float, str, bool)) or v is None:
+            items.append((new_key, v))
+    return dict(items)
+
+
 def _collect_all_metrics(run_dirs: list[Path]):
-    """Collects metric series across all runs, deduplicating points by x (epoch/step)."""
+    """Collects metric series across all runs for plotting."""
     data_by_metric: dict[str, dict[str, tuple[list[float], list[float]]]] = {}
     ignored_cols = {"epoch", "step", "_step", "timestamp", "created_at"}
 
@@ -61,7 +75,10 @@ def _collect_all_metrics(run_dirs: list[Path]):
                 continue
 
             fieldnames = [fn.strip() for fn in (reader.fieldnames or []) if fn]
-            metric_cols = [f for f in fieldnames if f.lower() not in ignored_cols]
+            metric_cols = [
+                f for f in fieldnames
+                if f.lower() not in ignored_cols and not f.startswith(IGNORE_PREFIXES)
+            ]
 
             for metric_name in metric_cols:
                 xy_map: dict[float, float] = {}
@@ -194,11 +211,10 @@ def _discover_run_dirs(
 
 def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None = None):
     if not run_dirs:
-        raise FileNotFoundError("No run folders with metrics were found under pilot_logs/.")
+        raise FileNotFoundError("No run folders found under pilot_logs/.")
 
     data_by_metric = _collect_all_metrics(run_dirs)
 
-    # Filter by TARGET_METRICS using exact matching first
     if TARGET_METRICS:
         filtered_data = {}
         for target in TARGET_METRICS:
@@ -220,10 +236,6 @@ def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None 
 
             if matched_key:
                 filtered_data[matched_key] = data_by_metric[matched_key]
-            else:
-                print(
-                    f"Warning: '{target}' not found in logged metrics. Available columns: {list(data_by_metric.keys())}"
-                )
 
         data_by_metric = filtered_data
 
@@ -233,7 +245,7 @@ def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None 
         }
 
     if not data_by_metric:
-        print("No valid metric series found matching your criteria.")
+        print("No valid metric series found matching criteria.")
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -253,7 +265,6 @@ def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None 
 
         fig.tight_layout()
 
-        # Sanitize filename (replaces slashes and spaces for safe file saving)
         file_name = (
             metric_name.lower()
             .replace("/", "_")
@@ -265,7 +276,103 @@ def _plot_individual_metrics(run_dirs, out_dir: Path, metric_filter: str | None 
 
         fig.savefig(metric_out_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved metric plot to: {metric_out_path}")
+        print(f"Saved metric plot: {metric_out_path}")
+
+
+def _generate_comparison_csv(run_dirs: list[Path], out_dir: Path):
+    """Parses static efficiency stats and final metric values into comparison.csv."""
+    summary_rows = []
+    ignored_time_cols = {"epoch", "step", "_step", "timestamp", "created_at"}
+
+    for run_dir in run_dirs:
+        run_name = run_dir.name
+        run_info = {"run_name": run_name}
+
+        # 1. Safe JSON parsing (handles 0-byte or corrupt JSON files gracefully)
+        for json_file in run_dir.rglob("*.json"):
+            try:
+                content = json_file.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    flat_data = _flatten_dict(data)
+                    for k, v in flat_data.items():
+                        k_lower = k.lower()
+                        if any(kw in k_lower for kw in EFFICIENCY_KEYWORDS):
+                            run_info[k] = v
+            except Exception:
+                pass
+
+        # 2. Extract logged metrics from metrics.csv, filtering out LR parameter noise
+        csv_paths = sorted(
+            run_dir.rglob("metrics.csv"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        if csv_paths:
+            try:
+                with open(csv_paths[0], "r", encoding="utf-8", newline="") as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+
+                if rows:
+                    fieldnames = [fn.strip() for fn in (reader.fieldnames or []) if fn]
+                    for col in fieldnames:
+                        col_lower = col.lower()
+
+                        if col_lower in ignored_time_cols or col.startswith(IGNORE_PREFIXES):
+                            continue
+
+                        vals = [
+                            _safe_float(r.get(col))
+                            for r in rows
+                            if r.get(col) is not None and r.get(col) != ""
+                        ]
+                        vals = [v for v in vals if v is not None]
+
+                        if not vals:
+                            continue
+
+                        # Treat static efficiency metrics distinctly from epoch-varying losses
+                        if any(kw in col_lower for kw in EFFICIENCY_KEYWORDS):
+                            run_info[col] = vals[-1]
+                        else:
+                            run_info[f"{col} (final)"] = vals[-1]
+
+            except Exception:
+                pass
+
+        summary_rows.append(run_info)
+
+    if not summary_rows:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    comparison_csv_path = out_dir / "comparison.csv"
+
+    # Order columns logically: Run Name -> Efficiency -> Primary Metrics -> Intermediate Block Metrics
+    all_keys = set()
+    for row in summary_rows:
+        all_keys.update(row.keys())
+
+    all_keys.discard("run_name")
+
+    efficiency_keys = sorted(
+        [k for k in all_keys if any(kw in k.lower() for kw in EFFICIENCY_KEYWORDS)]
+    )
+    primary_metrics = sorted(
+        [k for k in all_keys if k not in efficiency_keys and "block_" not in k.lower()]
+    )
+    block_metrics = sorted([k for k in all_keys if "block_" in k.lower()])
+
+    fieldnames = ["run_name"] + efficiency_keys + primary_metrics + block_metrics
+
+    with open(comparison_csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in summary_rows:
+            writer.writerow({fn: row.get(fn, "") for fn in fieldnames})
+
+    print(f"Saved comparison CSV: {comparison_csv_path}")
 
 
 def main():
@@ -281,7 +388,7 @@ def main():
         "--out",
         type=Path,
         default=None,
-        help="Custom output folder path (defaults to <pilot-logs>/../runs/sweep_plots/)",
+        help="Custom output folder path",
     )
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--run-dir", type=Path, default=None)
@@ -290,14 +397,13 @@ def main():
         "--metric",
         type=str,
         default=None,
-        help="Optional metric name filter to restrict plotted metrics further",
+        help="Optional metric name filter",
     )
     args = parser.parse_args()
 
     root = args.root.resolve()
     pilot_root = args.pilot_logs.resolve()
 
-    # Automatically set output directory inside sweep directory's runs/ folder
     if args.out is None:
         out_dir = (pilot_root.parent / "sweep_plots").resolve()
     else:
@@ -315,6 +421,7 @@ def main():
         return 1
 
     _plot_individual_metrics(run_dirs, out_dir, metric_filter=args.metric)
+    _generate_comparison_csv(run_dirs, out_dir)
     return 0
 
 
