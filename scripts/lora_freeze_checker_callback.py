@@ -1,5 +1,6 @@
 from lightning.pytorch.callbacks import Callback
 import torch
+import logging
 
 
 class LoRAFreezeChecker(Callback):
@@ -56,12 +57,14 @@ class LoRAFreezeChecker(Callback):
         if not changes:
             return
 
-        # Print a compact table sorted by magnitude of change
+        # Log a compact table sorted by magnitude of change
         changes_sorted = sorted(changes, key=lambda x: (0.0 if x[1] is None else -x[1]))
-        print("\n" + "=" * 80)
-        print("LoRA / Freeze check after optimizer.step():")
+        lines = []
+        lines.append("" + "=" * 80)
+        lines.append("LoRA / Freeze check after optimizer.step():")
         for name, diff in changes_sorted[: self.max_items]:
             status = "CHANGED" if (isinstance(diff, float) and diff > 0.0) else "UNCHANGED"
-            print(f" {status:8s} | {diff:12.6e} | {name}")
-        print("=" * 80 + "\n")
+            lines.append(f" {status:8s} | {diff:12.6e} | {name}")
+        lines.append("" + "=" * 80)
+        logging.info("\n" + "\n".join(lines))
 

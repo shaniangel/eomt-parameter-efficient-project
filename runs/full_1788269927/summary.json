@@ -1,0 +1,9 @@
+{
+  "mode": "full",
+  "backbone": "vit_base_patch16_224",
+  "use_pretrained": false,
+  "total_params": 92398999,
+  "trainable_params": 92398999,
+  "trainable_percentage": 100.0,
+  "output_dir": "C:\\Users\\guysh\\PycharmProjects\\eomt-parameter-efficient-project1\\runs\\full_1788269927"
+}

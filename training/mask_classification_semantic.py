@@ -144,6 +144,20 @@ class MaskClassificationSemantic(LightningModule):
                 )
                 import logging
                 logging.info(f"Applied LoRA adapters via lora_config: approx params added={added}")
+                # Print a parameter summary of the backbone to verify frozen vs trainable
+                try:
+                    from scripts.debug_param_summary import print_parameter_summary
+                except Exception:
+                    def print_parameter_summary(module, max_list: int = 200):
+                        total = sum(p.numel() for p in module.parameters())
+                        trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                        frozen = total - trainable
+                        print(f"Param summary: total={total:,}, trainable={trainable:,}, frozen={frozen:,}")
+
+                try:
+                    print_parameter_summary(self.network.encoder.backbone)
+                except Exception:
+                    pass
             else:
                 # Fallback to legacy args
                 target_blocks = lora_target_blocks or [-3, -2, -1]
@@ -161,6 +175,20 @@ class MaskClassificationSemantic(LightningModule):
                 )
                 import logging
                 logging.info(f"Applied LoRA adapters to blocks {target_blocks}: approx params added={added}")
+                # Print a parameter summary of the backbone to verify frozen vs trainable
+                try:
+                    from scripts.debug_param_summary import print_parameter_summary
+                except Exception:
+                    def print_parameter_summary(module, max_list: int = 200):
+                        total = sum(p.numel() for p in module.parameters())
+                        trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                        frozen = total - trainable
+                        print(f"Param summary: total={total:,}, trainable={trainable:,}, frozen={frozen:,}")
+
+                try:
+                    print_parameter_summary(self.network.encoder.backbone)
+                except Exception:
+                    pass
 
     def _load_pretrained_checkpoint(self, ckpt_path: str, load_class_head: bool = True):
         import os

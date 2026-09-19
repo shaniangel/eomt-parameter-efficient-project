@@ -15,6 +15,17 @@ import torch
 import warnings
 from lightning.pytorch import cli
 from lightning.pytorch.callbacks import ModelSummary, LearningRateMonitor
+try:
+    from scripts.lora_freeze_checker_callback import LoRAFreezeChecker
+except Exception:
+    # If callback module is unavailable at import-time (e.g., during static
+    # analysis), provide a lightweight no-op stand-in so trainer_defaults can
+    # always instantiate a callback object without error.
+    from lightning.pytorch.callbacks import Callback as _CB
+
+    class LoRAFreezeChecker(_CB):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
 from lightning.pytorch.loops.training_epoch_loop import _TrainingEpochLoop
 from lightning.pytorch.loops.fetchers import _DataFetcher, _DataLoaderIterDataFetcher
 
@@ -209,9 +220,11 @@ def cli_main():
         trainer_defaults={
             "precision": "16-mixed",
             "enable_model_summary": False,
-            "callbacks": [
+                "callbacks": [
                 ModelSummary(max_depth=3),
                 LearningRateMonitor(logging_interval="epoch"),
+                # Attach LoRAFreezeChecker for debugging LoRA vs frozen params when available
+                LoRAFreezeChecker(watch_patterns=["network.encoder.backbone", "lora_A", "lora_B"]) if LoRAFreezeChecker is not None else None,
             ],
             "devices": 1,
             "gradient_clip_val": 0.01,

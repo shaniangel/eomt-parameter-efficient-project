@@ -1,0 +1,12 @@
+{
+  "mode": "lora",
+  "backbone": "vit_base_patch16_224",
+  "use_pretrained": false,
+  "total_params": 92448151,
+  "trainable_params": 6750871,
+  "trainable_percentage": 7.302332093153491,
+  "output_dir": "C:\\Users\\guysh\\PycharmProjects\\eomt-parameter-efficient-project1\\runs\\lora_1788270408",
+  "seed": 42,
+  "git_commit": "9782c8f40f3b560de860b9ef901269cea1264c30",
+  "cmdline": "C:\\Users\\guysh\\PycharmProjects\\eomt-parameter-efficient-project1\\scripts\\experiment_runner.py --mode lora --dataset synthetic --lora-target q --seed 42"
+}

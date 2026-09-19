@@ -1,4 +1,10 @@
 import logging
+import sys
+from pathlib import Path
+
+# Ensure project root is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import torch
 import torch.nn as nn
 from models.lora import apply_lora_to_backbone
