@@ -26,6 +26,7 @@ from torchmetrics.functional.detection._panoptic_quality_common import (
     _get_color_areas,
     _calculate_iou,
 )
+import wandb
 from PIL import Image
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
@@ -36,7 +37,11 @@ from torch.nn.functional import interpolate
 from torchvision.transforms.v2.functional import pad
 import logging
 
+from training.progress import downscale, write_progress
 from training.two_stage_warmup_poly_schedule import TwoStageWarmupPolySchedule
+
+# Number of fixed validation images whose predictions are saved after every epoch
+PROGRESS_NUM_IMAGES = 6
 
 bold_green = "\033[1;32m"
 reset = "\033[0m"
@@ -105,6 +110,9 @@ class LightningModule(lightning.LightningModule):
         if self.attn_mask_annealing_enabled and self.attn_mask_annealing_start_steps is None:
             self._set_default_attn_mask_annealing_steps()
 
+        if not hasattr(self, "progress_history"):  # else restored from a checkpoint
+            self.progress_history, self.progress_preds = [], {}
+
         num_total = sum(p.numel() for p in self.parameters())
         num_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         backbone_params = list(self.network.encoder.backbone.parameters())
@@ -116,24 +124,101 @@ class LightningModule(lightning.LightningModule):
             "params_backbone_trainable": sum(
                 p.numel() for p in backbone_params if p.requires_grad
             ),
-            "gflops": self._count_gflops(),
         }
         rank_zero_info(f"Efficiency stats: {self.efficiency_stats}")
 
+    def on_train_start(self):
+        # Runs after a resumed run has restored global_step, so this session's steps
+        # can be told apart from those of earlier sessions
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(self.device)
-        self.train_start_time = time.perf_counter()
+        self.session_start_step = self.global_step
+        self.session_start_time = time.perf_counter()
+
+    def _timing(self):
+        """Training time and peak GPU memory, summed / maxed over resumed sessions."""
+        previous = getattr(self, "previous_timing", {})
+        timing = {
+            "train_time_sec": previous.get("train_time_sec", 0.0)
+            + time.perf_counter() - self.session_start_time
+        }
+        if torch.cuda.is_available():
+            timing["peak_gpu_mem_gb"] = max(
+                previous.get("peak_gpu_mem_gb", 0.0),
+                torch.cuda.max_memory_allocated(self.device) / 1024**3,
+            )
+        return timing
+
+    def on_load_checkpoint(self, checkpoint):
+        self.previous_timing = checkpoint.get("timing", {})
+        if "progress" in checkpoint:
+            self.progress_history = checkpoint["progress"]["history"]
+            self.progress_preds = checkpoint["progress"]["preds"]
+
+    def on_train_epoch_start(self):
+        self.epoch_loss_sum, self.epoch_loss_count = 0.0, 0
+
+    def on_validation_epoch_start(self):
+        # Pick PROGRESS_NUM_IMAGES validation batches spread over the validation set; the
+        # first image of each is tracked. Validation is not shuffled, so they are the same
+        # images every epoch. Only during training, not for sanity checks or `validate`.
+        self.progress_samples, self.progress_epoch_preds = [], []
+        num_batches = int(sum(self.trainer.num_val_batches))
+        tracking = (
+            self.trainer.state.fn == "fit"
+            and not self.trainer.sanity_checking
+            and self.trainer.logger is not None
+            and num_batches > 0
+        )
+        self.progress_batch_idxs = (
+            set(np.linspace(0, num_batches - 1, min(PROGRESS_NUM_IMAGES, num_batches)).round().astype(int).tolist())
+            if tracking
+            else set()
+        )
+
+    def add_progress_sample(self, img, target, logits, batch_idx):
+        if batch_idx in self.progress_batch_idxs:
+            small_img, small_target = downscale(img, target)
+            _, small_pred = downscale(img, logits.argmax(0))
+            self.progress_samples.append((small_img, small_target))
+            self.progress_epoch_preds.append(small_pred)
+
+    def update_progress(self):
+        """Records this epoch's loss and mIoU and rewrites <run folder>/progress/."""
+        if not self.progress_batch_idxs:
+            return
+        epoch = self.current_epoch
+        # A resumed run may repeat an epoch that was interrupted: keep the latest one
+        self.progress_history = [h for h in self.progress_history if h["epoch"] != epoch]
+        self.progress_history.append(
+            {
+                "epoch": epoch,
+                "step": self.global_step,
+                "train_loss": self.epoch_loss_sum / max(1, self.epoch_loss_count),
+                "val_miou": self.last_val_miou,
+                "val_miou_present": self.last_val_miou_present,
+                "elapsed_sec": self._timing()["train_time_sec"],
+            }
+        )
+        self.progress_preds[epoch] = self.progress_epoch_preds
+        if self.trainer.is_global_zero:
+            write_progress(
+                Path(self.trainer.log_dir, "progress"),
+                self.progress_samples,
+                self.progress_preds,
+                self.progress_history,
+                self.trainer.max_epochs,
+            )
 
     def on_train_end(self):
-        train_time = time.perf_counter() - self.train_start_time
-        self.efficiency_stats["train_time_sec"] = train_time
+        session_time = time.perf_counter() - self.session_start_time
+        session_steps = self.global_step - self.session_start_step
+        self.efficiency_stats |= self._timing()
         self.efficiency_stats["train_steps"] = self.global_step
-        # Includes validation time, so it slightly overestimates the pure step time
-        self.efficiency_stats["sec_per_step"] = train_time / max(1, self.global_step)
-        if torch.cuda.is_available():
-            self.efficiency_stats["peak_gpu_mem_gb"] = (
-                torch.cuda.max_memory_allocated(self.device) / 1024**3
-            )
+        # Measured over this session only; includes validation time, so it slightly
+        # overestimates the pure step time
+        self.efficiency_stats["sec_per_step"] = session_time / max(1, session_steps)
+        self.efficiency_stats["resumed"] = self.session_start_step > 0
 
         if self.trainer.logger is not None and self.trainer.is_global_zero:
             path = Path(self.trainer.log_dir, "efficiency_stats.json")
@@ -155,23 +240,6 @@ class LightningModule(lightning.LightningModule):
             f"Attention mask annealing: start steps {self.attn_mask_annealing_start_steps}, "
             f"end steps {self.attn_mask_annealing_end_steps}"
         )
-
-    @torch.no_grad()
-    def _count_gflops(self):
-        from fvcore.nn import FlopCountAnalysis
-
-        was_training = self.network.training
-        self.network.eval()
-        try:
-            imgs = torch.zeros(1, 3, *self.img_size, device=self.device)
-            flops = FlopCountAnalysis(self.network, imgs)
-            flops.unsupported_ops_warnings(False).uncalled_modules_warnings(False)
-            return flops.total() / 1e9
-        except Exception as e:
-            logging.warning(f"GFLOPs count failed: {e}")
-            return None
-        finally:
-            self.network.train(was_training)
 
     def configure_optimizers(self):
         encoder_param_names = {
@@ -289,6 +357,10 @@ class LightningModule(lightning.LightningModule):
         batch_idx=None,
         dataloader_idx=None,
     ):
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs
+        self.epoch_loss_sum += float(loss)
+        self.epoch_loss_count += 1
+
         if self.attn_mask_annealing_enabled:
             for i in range(self.network.num_blocks):
                 self.network.attn_mask_probs[i] = self.mask_annealing(
@@ -488,10 +560,13 @@ class LightningModule(lightning.LightningModule):
                 f"metrics/{log_prefix}_iou_all{block_postfix}",
                 iou_all,
             )
+            iou_present = float(iou_per_class.nanmean())
             self.log(
                 f"metrics/{log_prefix}_iou_present{block_postfix}",
-                float(iou_per_class.nanmean()),
+                iou_present,
             )
+            if i == len(self.metrics) - 1:  # final block: the model's actual prediction
+                self.last_val_miou, self.last_val_miou_present = iou_all, iou_present
 
     def _on_eval_epoch_end_instance(self, log_prefix):
         for i, metric in enumerate(self.metrics):  # type: ignore
@@ -677,10 +752,7 @@ class LightningModule(lightning.LightningModule):
 
         block_postfix = self.block_postfix(block_idx)
         name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-        if self.trainer.logger is not None and self.trainer.is_global_zero:
-            path = Path(self.trainer.log_dir, "predictions", f"{name}_epoch_{self.current_epoch}.png")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(buf.getvalue())
+        self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
 
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
@@ -926,6 +998,15 @@ class LightningModule(lightning.LightningModule):
         checkpoint["state_dict"] = {
             k.replace("._orig_mod", ""): v for k, v in checkpoint["state_dict"].items()
         }
+        # Lets a resumed run report its total training time and keep its progress files
+        # (see on_load_checkpoint)
+        if hasattr(self, "session_start_time"):
+            checkpoint["timing"] = self._timing()
+        if hasattr(self, "progress_history"):
+            checkpoint["progress"] = {
+                "history": self.progress_history,
+                "preds": self.progress_preds,
+            }
 
     def _zero_init_outside_encoder(
         self, encoder_prefix="network.encoder.", skip_class_head=False

@@ -128,13 +128,12 @@ class MaskClassificationSemantic(LightningModule):
 
             self.update_metrics_semantic(logits, targets, i)
 
-            if batch_idx == 0:
-                self.plot_semantic(
-                    imgs[0], targets[0], logits[0], log_prefix, i, batch_idx
-                )
+            if i == len(mask_logits_per_layer) - 1:  # final block
+                self.add_progress_sample(imgs[0], targets[0], logits[0], batch_idx)
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
+        self.update_progress()
 
     def on_validation_end(self):
         self._on_eval_end_semantic("val")
