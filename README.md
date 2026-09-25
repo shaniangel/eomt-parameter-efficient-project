@@ -45,9 +45,12 @@ python scripts/summarize_results.py                 # results/results.md, result
 python scripts/visualize_predictions.py             # results/qualitative.png
 ```
 
-With two machines, split the regimes: run `bash scripts/run_experiments.sh full` on one and
-`bash scripts/run_experiments.sh frozen lora` on the other. Then copy the `logs/<regime>/` folders
-into `logs/` on one machine and run the two result scripts there.
+To train each regime on its own GPU machine, run `bash scripts/run_experiments.sh full`,
+`bash scripts/run_experiments.sh frozen` and `bash scripts/run_experiments.sh lora` on three
+machines (with two machines, give one of them two regimes, e.g. `frozen lora`). Then copy the
+`logs/<regime>/` folders into `logs/` on one machine and run the two result scripts there.
+Training times are only comparable if the machines have the same GPU model and nothing else
+runs on them.
 
 Extra arguments go to `main.py`, e.g. `--data.path /path/to/ade20k` or `--trainer.max_epochs 8`.
 A single regime can also be trained with:

@@ -165,7 +165,8 @@ never overwrite each other and are easy to tell apart.
 ### `scripts/`
 
 - `run_experiments.sh [full] [frozen] [lora] [--smoke] [extra args]`: trains the given regimes
-  one after another on the current machine and saves each console output to
+  one after another on the current machine (give each machine one regime to run them in
+  parallel) and saves each console output to
   `logs/<regime>_<start time>.out`. It stops if a run fails.
 - `summarize_results.py`:
   - For each regime, picks the latest finished run (or the one given with `--run`) and reads
@@ -191,7 +192,8 @@ Run them with `python -m pytest tests`.
 
 ## Things to keep in mind when reading results
 
-- For the first 500 steps, full and frozen training behave the same. The paper's warmup trains
+- For the first 500 steps, full and frozen training behave the same, and the LoRA weights do
+  not change yet (in a smoke test of 20 steps they stay exactly at their starting values). The paper's warmup trains
   only the new parameters (queries and heads) first, then warms up the backbone learning rate
   over the next 1,000 steps. The regimes only start to differ after that.
 - LoRA parameters live inside the backbone blocks, so they get the backbone's learning rate and

@@ -4,10 +4,11 @@
 # Usage:
 #   bash scripts/run_experiments.sh [full] [frozen] [lora] [--smoke] [extra main.py args...]
 #
-# With no regime given, all three are run. With two machines, split the work, e.g.:
+# With no regime given, all three are run. To use one GPU machine per regime, run e.g.:
 #   machine A:  bash scripts/run_experiments.sh full
-#   machine B:  bash scripts/run_experiments.sh frozen lora
-# then copy logs/<regime>/ from machine B into logs/ on machine A before summarizing.
+#   machine B:  bash scripts/run_experiments.sh frozen
+#   machine C:  bash scripts/run_experiments.sh lora
+# then copy the logs/<regime>/ folders into logs/ on one machine before summarizing.
 #
 # --smoke stacks configs/project/smoke.yaml for a quick end-to-end check.
 # Extra arguments are passed to main.py, e.g. --data.path /path/to/ade20k
