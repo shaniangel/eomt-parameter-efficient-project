@@ -1,9 +1,10 @@
 # Shared setup for all training regimes: EoMT-S (DINOv2 ViT-S/14) on ADE20K semantic at
-# 512x512, following the paper's ADE20K recipe (batch size 16, lr 1e-4) with a shorter
-# schedule (the paper trains 31 epochs). Stack a regime config on top of this one, e.g.:
+# 512x512, following the paper's ADE20K recipe (batch size 16, lr 1e-4, 31 epochs).
+# On one A10 (24 GB) full fine-tuning takes ~20 min per epoch, ~10-11 h in total.
+# Stack a regime config on top of this one, e.g.:
 #   python main.py fit -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml
 trainer:
-  max_epochs: 12
+  max_epochs: 31
   check_val_every_n_epoch: 1
   logger:
     class_path: training.csv_logger.TimestampedCSVLogger

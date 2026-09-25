@@ -87,8 +87,11 @@ python main.py validate -c configs/project/base_ade20k_eomt_small_512.yaml -c co
 - **Same as the paper:** AdamW with lr 1e-4, layer-wise lr decay 0.8, weight decay 0.05, poly decay
   0.9, two-stage warmup (500 steps for the new parameters, then 1000 for the backbone), mask annealing
   (steps scaled to our schedule) and L2 = 3 query blocks for ViT-S.
-- **Reduced to fit our compute:** fewer epochs than the paper's 31 (12 by default, chosen as
-  described above). All regimes use the same hyperparameters; none were tuned per regime.
+- **Same schedule as the paper:** batch size 16 and 31 epochs. On one NVIDIA A10 (24 GB) this
+  takes about 10-11 hours for full fine-tuning, using under 10 GB of GPU memory.
+- **Different from the paper:** the smaller ViT-S backbone (the paper's main results use
+  ViT-L), and one GPU per run instead of four. All regimes use the same hyperparameters; none
+  were tuned per regime.
 - **LoRA learning rate:** the LoRA parameters sit inside the backbone blocks, so they share the
   backbone's learning rate and warmup.
 
