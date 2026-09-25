@@ -1,7 +1,18 @@
-# Quick end-to-end check, stack last: ... -c configs/project/<regime>.yaml -c configs/project/smoke.yaml
+# Quick end-to-end learning test (~5 min per regime on an A10), stack last:
+#   ... -c configs/project/<regime>.yaml -c configs/project/smoke.yaml
+# 5 epochs of 20 training batches, validating on 5 batches after each epoch. The warmup is
+# shortened so the backbone and LoRA get a non-zero learning rate within the first steps
+# (the real runs keep the paper's [500, 1000]). Runs go to logs_smoke/ so they never end up
+# in the results. Check the outcome with: python scripts/check_smoke.py
 trainer:
-  max_epochs: 1
+  max_epochs: 5
   limit_train_batches: 20
   limit_val_batches: 5
   num_sanity_val_steps: 0
   log_every_n_steps: 1
+  logger:
+    init_args:
+      save_dir: logs_smoke
+model:
+  init_args:
+    warmup_steps: [5, 5]
