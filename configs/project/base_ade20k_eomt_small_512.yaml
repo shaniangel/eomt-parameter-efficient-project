@@ -1,0 +1,36 @@
+# Shared setup for all training regimes: EoMT-S (DINOv2 ViT-S/14) on ADE20K semantic at
+# 512x512, following the paper's ADE20K recipe with a shorter schedule and a smaller
+# batch that fits one 24 GB GPU. Stack a regime config on top of this one, e.g.:
+#   python main.py fit -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml
+trainer:
+  max_epochs: 12
+  check_val_every_n_epoch: 1
+  logger:
+    class_path: lightning.pytorch.loggers.CSVLogger
+    init_args:
+      save_dir: logs
+model:
+  class_path: training.mask_classification_semantic.MaskClassificationSemantic
+  init_args:
+    # Annealing steps are derived from the schedule length when not given
+    attn_mask_annealing_enabled: True
+    lr: 1e-4
+    llrd: 0.8
+    weight_decay: 0.05
+    network:
+      class_path: models.eomt.EoMT
+      init_args:
+        num_q: 100
+        num_blocks: 3 # L2 = 3 for ViT-S in the paper
+        encoder:
+          class_path: models.vit.ViT
+          init_args:
+            backbone_name: vit_small_patch14_reg4_dinov2
+data:
+  class_path: datasets.ade20k_semantic.ADE20KSemantic
+  init_args:
+    path: data/ade20k
+    batch_size: 8
+    num_workers: 8
+    img_size: [512, 512]
+compile_disabled: true

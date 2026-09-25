@@ -1,0 +1,8 @@
+# Regime 1: full fine-tuning of the backbone, queries and heads
+trainer:
+  logger:
+    init_args:
+      name: full
+model:
+  init_args:
+    freeze_backbone: false

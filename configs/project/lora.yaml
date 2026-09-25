@@ -1,0 +1,12 @@
+# Regime 3: frozen backbone plus LoRA on the qkv and output projections of the final
+# num_blocks backbone blocks, where the queries are processed
+trainer:
+  logger:
+    init_args:
+      name: lora
+model:
+  init_args:
+    freeze_backbone: true
+    lora_rank: 8
+    lora_alpha: 8
+    lora_modules: [qkv, proj]

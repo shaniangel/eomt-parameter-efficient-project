@@ -1,0 +1,8 @@
+# Regime 2: frozen backbone, only the queries and heads are trained
+trainer:
+  logger:
+    init_args:
+      name: frozen
+model:
+  init_args:
+    freeze_backbone: true
