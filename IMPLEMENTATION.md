@@ -5,28 +5,42 @@ Everything not mentioned here is the unchanged upstream code.
 
 ## The big picture
 
-```mermaid
-flowchart LR
-    subgraph configs["configs/project/"]
-        base["base_ade20k_eomt_small_512.yaml<br/>(model, data, schedule)"]
-        regime["full.yaml / frozen.yaml / lora.yaml<br/>(what is trained)"]
-        smoke["smoke.yaml<br/>(optional, quick check)"]
-    end
-
-    run["scripts/run_experiments.sh"] --> main
-    configs --> main["main.py<br/>(upstream LightningCLI)"]
-
-    main --> data["datasets/ade20k_semantic.py<br/>reads ADEChallengeData2016.zip"]
-    main --> model["training/mask_classification_semantic.py<br/>builds EoMT, then freezes the backbone<br/>and/or adds LoRA"]
-    model --> lora["models/lora.py<br/>LoRALinear, apply_lora"]
-    model --> lm["training/lightning_module.py<br/>training loop, metrics,<br/>efficiency stats, prediction PNGs"]
-    main --> logger["training/csv_logger.py<br/>one folder per run, named by start time"]
-
-    lm --> out["logs/REGIME/START_TIME/<br/>metrics.csv<br/>efficiency_stats.json<br/>checkpoints/<br/>predictions/"]
-    logger --> out
-
-    out --> summ["scripts/summarize_results.py"] --> res1["results/results.md, results.csv<br/>curves_val_miou.png, curves_train_loss.png"]
-    out --> vis["scripts/visualize_predictions.py"] --> res2["results/qualitative.png"]
+```text
+  configs/project/
+  ┌───────────────────────────────────────────────┐
+  │ base_ade20k_eomt_small_512.yaml               │  model, data, schedule (shared)
+  │ + full.yaml | frozen.yaml | lora.yaml         │  what is trained
+  │ + smoke.yaml (optional)                       │  quick check
+  └───────────────────────┬───────────────────────┘
+                          │ read by
+                          ▼
+  scripts/run_experiments.sh ──► main.py (upstream LightningCLI)
+                                    │
+          ┌─────────────────────────┼──────────────────────────────┐
+          ▼                         ▼                              ▼
+  datasets/ade20k_semantic.py   training/mask_classification_    training/csv_logger.py
+  reads ADEChallengeData2016    semantic.py                      one run folder per start
+  .zip                          builds EoMT, then freezes the    time
+                                backbone and/or adds LoRA
+                                (models/lora.py)
+                                    │
+                                    ▼
+                                training/lightning_module.py
+                                training loop, metrics, efficiency
+                                stats, prediction PNGs
+                                    │
+                                    ▼
+                  logs/<regime>/<start time>/
+                  ├── metrics.csv
+                  ├── efficiency_stats.json
+                  ├── checkpoints/
+                  └── predictions/
+                          │
+          ┌───────────────┴────────────────┐
+          ▼                                ▼
+  scripts/summarize_results.py     scripts/visualize_predictions.py
+  results/results.md, .csv         results/qualitative.png
+  results/curves_*.png
 ```
 
 In words:
@@ -50,12 +64,11 @@ before the last 3 blocks (`num_blocks: 3`, called L2 in the paper). In those blo
 and the image patches attend to each other, and the heads turn the query tokens into masks and
 classes.
 
-```mermaid
-flowchart LR
-    img["image patches"] --> b1["blocks 0-8<br/>(image only)"]
-    b1 --> b2["blocks 9-11<br/>(image + queries)<br/>attn.qkv, attn.proj ← LoRA here"]
-    q["100 queries"] --> b2
-    b2 --> heads["class head, mask head,<br/>upscale layers"]
+```text
+  image patches ──► blocks 0-8 ──► blocks 9-11 ──────► class head, mask head, upscale layers
+                    (image only)   (image + queries)
+                                        ▲   LoRA goes on attn.qkv and attn.proj here
+                   100 queries ─────────┘
 ```
 
 Inside each of the 12 blocks (sizes for ViT-S, 384 features per token):
