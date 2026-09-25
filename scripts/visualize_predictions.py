@@ -1,9 +1,10 @@
 """Plots side-by-side predictions of the trained regimes on the same validation images.
 
-Each regime's model is rebuilt from the project configs and loaded from the latest
-checkpoint in ``<logs>/<regime>/version_*/checkpoints``. Inference uses the same sliding
-window path as validation. The grid (image | ground truth | one column per regime) is
-written to ``<out>/qualitative.png``.
+Each regime's model is rebuilt from the project configs and loaded from the checkpoint
+of the same run that summarize_results.py picks (the latest finished run, or the folder
+given with ``--run <regime>=<folder>``). Inference uses the same sliding window path as
+validation. The grid (image | ground truth | one column per regime) is written to
+``<out>/qualitative.png``.
 
 Usage:
     python scripts/visualize_predictions.py [--logs logs] [--data data/ade20k] [--indices 0 10 20]
@@ -25,16 +26,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import LightningCLI  # noqa: E402
+from scripts.summarize_results import find_run_dir, parse_run_args  # noqa: E402
 from datasets.lightning_data_module import LightningDataModule  # noqa: E402
 from training.lightning_module import LightningModule  # noqa: E402
 
 BASE_CONFIG = ROOT / "configs" / "project" / "base_ade20k_eomt_small_512.yaml"
 
 
-def latest_checkpoint(logs: Path, regime: str) -> Path:
-    ckpts = sorted((logs / regime).glob("version_*/checkpoints/*.ckpt"), key=lambda p: p.stat().st_mtime)
+def find_checkpoint(logs: Path, regime: str, chosen: dict[str, Path]) -> Path:
+    run_dir = find_run_dir(logs, regime, chosen)
+    ckpts = sorted(run_dir.glob("checkpoints/*.ckpt"), key=lambda p: p.stat().st_mtime) if run_dir else []
     if not ckpts:
-        raise FileNotFoundError(f"No checkpoint found under {logs / regime}")
+        raise FileNotFoundError(f"No checkpoint found for {regime} under {logs / regime}")
     return ckpts[-1]
 
 
@@ -80,14 +83,16 @@ def main():
     parser.add_argument("--out", type=Path, default=Path("results"))
     parser.add_argument("--regimes", nargs="+", default=["full", "frozen", "lora"])
     parser.add_argument("--indices", nargs="+", type=int, default=[0, 100, 200, 300, 400, 500])
+    parser.add_argument("--run", action="append", default=[], metavar="REGIME=FOLDER")
     args = parser.parse_args()
+    chosen = parse_run_args(args.run)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     palette = np.random.default_rng(0).integers(0, 256, size=(256, 3), dtype=np.uint8)
 
     samples, gts, preds = None, None, {}
     for regime in args.regimes:
-        ckpt_path = latest_checkpoint(args.logs, regime)
+        ckpt_path = find_checkpoint(args.logs, regime, chosen)
         print(f"{regime}: {ckpt_path}")
         model, datamodule = build(regime, args.data)
         state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)["state_dict"]

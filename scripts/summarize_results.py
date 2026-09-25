@@ -1,11 +1,12 @@
 """Builds the results table and convergence plots from the CSVLogger outputs.
 
-For every regime it reads the latest ``<logs>/<regime>/version_*/`` folder
-(``metrics.csv`` and ``efficiency_stats.json``) and writes to ``<out>/``:
-``results.md``, ``results.csv``, ``curves_val_miou.png`` and ``curves_train_loss.png``.
+For every regime it reads the latest finished run in ``<logs>/<regime>/`` (a run folder
+with ``efficiency_stats.json``, which is written when training ends), or the folder given
+with ``--run <regime>=<folder>``. It writes to ``<out>/``: ``results.md``, ``results.csv``,
+``curves_val_miou.png`` and ``curves_train_loss.png``.
 
 Usage:
-    python scripts/summarize_results.py [--logs logs] [--out results] [--regimes full frozen lora]
+    python scripts/summarize_results.py [--logs logs] [--out results] [--run lora=logs/lora/<folder>]
 """
 
 import argparse
@@ -23,11 +24,23 @@ VAL_MIOU = "metrics/val_iou_all"
 TRAIN_LOSS = "losses/train_loss_total"
 
 
-def latest_run_dir(logs: Path, regime: str) -> Path | None:
-    versions = sorted(
-        (logs / regime).glob("version_*"), key=lambda p: int(p.name.split("_")[-1])
-    )
-    return versions[-1] if versions else None
+def find_run_dir(logs: Path, regime: str, chosen: dict[str, Path]) -> Path | None:
+    """The run folder given with --run, else the latest finished run of the regime."""
+    if regime in chosen:
+        return chosen[regime]
+    # Run folders are named by start time, so sorting by name sorts by date
+    finished = sorted(p.parent for p in (logs / regime).glob("*/efficiency_stats.json"))
+    return finished[-1] if finished else None
+
+
+def parse_run_args(values: list[str]) -> dict[str, Path]:
+    runs = {}
+    for value in values:
+        regime, sep, folder = value.partition("=")
+        if not sep:
+            raise SystemExit(f"--run expects <regime>=<folder>, got {value!r}")
+        runs[regime] = Path(folder)
+    return runs
 
 
 def read_series(metrics_csv: Path, key: str, x_key: str) -> tuple[list, list]:
@@ -50,14 +63,17 @@ def main():
     parser.add_argument("--logs", type=Path, default=Path("logs"))
     parser.add_argument("--out", type=Path, default=Path("results"))
     parser.add_argument("--regimes", nargs="+", default=["full", "frozen", "lora"])
+    parser.add_argument("--run", action="append", default=[], metavar="REGIME=FOLDER")
     args = parser.parse_args()
+    chosen = parse_run_args(args.run)
 
     runs = {}
     for regime in args.regimes:
-        run_dir = latest_run_dir(args.logs, regime)
+        run_dir = find_run_dir(args.logs, regime, chosen)
         if run_dir is None or not (run_dir / "metrics.csv").exists():
-            print(f"Skipping {regime}: no run found under {args.logs / regime}")
+            print(f"Skipping {regime}: no finished run found under {args.logs / regime}")
             continue
+        print(f"{regime}: {run_dir}")
         stats_path = run_dir / "efficiency_stats.json"
         runs[regime] = {
             "dir": run_dir,
