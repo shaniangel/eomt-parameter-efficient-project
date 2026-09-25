@@ -58,6 +58,22 @@ flowchart LR
     b2 --> heads["class head, mask head,<br/>upscale layers"]
 ```
 
+Inside each of the 12 blocks (sizes for ViT-S, 384 features per token):
+
+| Component | What it does | Weights | LoRA? |
+|---|---|---|---|
+| `norm1`, `norm2` | normalize each token | small | no |
+| `attn.qkv` | turns every token into a query, key and value (384 → 3×384) | 443 K | **yes**, in blocks 9-11 |
+| attention itself | each token mixes in information from the tokens it attends to | none | – |
+| `attn.proj` | combines the attention heads' outputs (384 → 384) | 148 K | **yes**, in blocks 9-11 |
+| `ls1`, `ls2` | LayerScale: learned per-feature scaling of each branch | tiny | no |
+| `mlp.fc1`, `mlp.fc2` | per-token feed-forward network (384 → 1536 → 384) | 1.18 M | no |
+
+Attention is the only place where tokens exchange information, so in blocks 9-11 it is where the
+queries collect information from the image patches. The MLP works on every token separately.
+LoRA on `qkv` and `proj` therefore adapts exactly the query–image interaction, with 18,432
+parameters per block (qkv: 8×384 + 1152×8; proj: 8×384 + 384×8).
+
 | Regime | Backbone blocks 0-8 | Backbone blocks 9-11 | Queries + heads |
 |---|---|---|---|
 | `full` | trained | trained | trained |
