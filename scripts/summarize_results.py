@@ -2,8 +2,9 @@
 
 For every regime it reads the latest finished run in ``<logs>/<regime>/`` (a run folder
 with ``efficiency_stats.json``, which is written when training ends), or the folder given
-with ``--run <regime>=<folder>``. It writes to ``<out>/``: ``results.md``, ``results.csv``,
-``curves_val_miou.png`` and ``curves_train_loss.png``.
+with ``--run <regime>=<folder>``. It checks that the runs used the same settings (from each
+run's ``config.yaml``) apart from the regime itself, then writes to ``<out>/``:
+``results.md``, ``results.csv``, ``curves_val_miou.png`` and ``curves_train_loss.png``.
 
 Usage:
     python scripts/summarize_results.py [--logs logs] [--out results] [--run lora=logs/lora/<folder>]
@@ -19,9 +20,23 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 VAL_MIOU = "metrics/val_iou_all"
 TRAIN_LOSS = "losses/train_loss_total"
+
+# Config keys that may differ between the compared runs: the regime itself, run naming,
+# machine-specific paths and worker counts, and the checkpoint a run was resumed from
+REGIME_SPECIFIC_SETTINGS = (
+    "model.init_args.freeze_backbone",
+    "model.init_args.lora_",
+    "trainer.logger.init_args.name",
+    "trainer.logger.init_args.version",
+    "trainer.logger.init_args.save_dir",
+    "data.init_args.path",
+    "data.init_args.num_workers",
+    "ckpt_path",
+)
 
 
 def find_run_dir(logs: Path, regime: str, chosen: dict[str, Path]) -> Path | None:
@@ -44,13 +59,54 @@ def parse_run_args(values: list[str]) -> dict[str, Path]:
 
 
 def read_series(metrics_csv: Path, key: str, x_key: str) -> tuple[list, list]:
-    xs, ys = [], []
+    # A resumed run appends to metrics.csv and may repeat steps of the interrupted epoch;
+    # keep the latest value for each step or epoch
+    values = {}
     with open(metrics_csv, newline="") as f:
         for row in csv.DictReader(f):
             if row.get(key):
-                xs.append(int(row[x_key]))
-                ys.append(float(row[key]))
-    return xs, ys
+                values[int(row[x_key])] = float(row[key])
+    xs = sorted(values)
+    return xs, [values[x] for x in xs]
+
+
+def flatten(config: dict, prefix: str = "") -> dict:
+    flat = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            flat |= flatten(value, f"{prefix}{key}.")
+        else:
+            flat[f"{prefix}{key}"] = value
+    return flat
+
+
+def check_settings(runs: dict, allow_mismatch: bool):
+    """Stops if the runs differ in any setting other than the regime-specific ones."""
+    settings = {}
+    for regime, run in runs.items():
+        config_path = run["dir"] / "config.yaml"
+        if not config_path.exists():
+            print(f"WARNING: {regime} has no config.yaml, its settings cannot be checked")
+            continue
+        flat = flatten(yaml.safe_load(config_path.read_text()))
+        settings[regime] = {
+            k: v for k, v in flat.items() if not k.startswith(REGIME_SPECIFIC_SETTINGS)
+        }
+
+    keys = sorted(set().union(*settings.values())) if settings else []
+    differences = [
+        f"  {key}: "
+        + ", ".join(f"{regime}={config.get(key)!r}" for regime, config in settings.items())
+        for key in keys
+        if len({repr(config.get(key)) for config in settings.values()}) > 1
+    ]
+    if differences:
+        message = "The runs were trained with different settings:\n" + "\n".join(differences)
+        if not allow_mismatch:
+            raise SystemExit(
+                message + "\nPick matching runs with --run, or pass --allow-mismatch."
+            )
+        print("WARNING: " + message)
 
 
 def smooth(values: list[float], window: int) -> np.ndarray:
@@ -64,6 +120,11 @@ def main():
     parser.add_argument("--out", type=Path, default=Path("results"))
     parser.add_argument("--regimes", nargs="+", default=["full", "frozen", "lora"])
     parser.add_argument("--run", action="append", default=[], metavar="REGIME=FOLDER")
+    parser.add_argument(
+        "--allow-mismatch",
+        action="store_true",
+        help="summarize even if the runs used different settings",
+    )
     args = parser.parse_args()
     chosen = parse_run_args(args.run)
 
@@ -84,6 +145,7 @@ def main():
 
     if not runs:
         raise SystemExit("No runs found")
+    check_settings(runs, args.allow_mismatch)
 
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -105,7 +167,6 @@ def main():
                     if "params_backbone" in stats
                     else None
                 ),
-                "gflops": stats.get("gflops"),
                 "final_miou": miou,
                 "best_miou": max(run["val"][1]) * 100 if run["val"][1] else None,
                 "delta_vs_full": (
@@ -130,15 +191,15 @@ def main():
         return "–" if value is None else format(value, spec)
 
     lines = [
-        "| Regime | Trainable params | Trainable % | Backbone trainable % | GFLOPs "
+        "| Regime | Trainable params | Trainable % | Backbone trainable % "
         "| mIoU (final) | mIoU (best) | Δ vs full | Train time (h) | Peak mem (GB) |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         lines.append(
             f"| {row['regime']} | {fmt(row['trainable_params'], ',')} "
             f"| {fmt(row['trainable_pct'], '.2f')} | {fmt(row['backbone_trainable_pct'], '.3f')} "
-            f"| {fmt(row['gflops'], '.1f')} | {fmt(row['final_miou'], '.2f')} "
+            f"| {fmt(row['final_miou'], '.2f')} "
             f"| {fmt(row['best_miou'], '.2f')} | {fmt(row['delta_vs_full'], '+.2f')} "
             f"| {fmt(row['train_time_h'], '.2f')} | {fmt(row['peak_gpu_mem_gb'], '.1f')} |"
         )

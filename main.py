@@ -157,13 +157,22 @@ class LightningCLI(cli.LightningCLI):
         self.trainer.fit(model, **kwargs)
 
 
+class SaveFitConfigCallback(cli.SaveConfigCallback):
+    """Saves the resolved config as config.yaml in the run folder, for training runs only."""
+
+    def setup(self, trainer, pl_module, stage):
+        if stage == "fit" and trainer.logger is not None:
+            super().setup(trainer, pl_module, stage)
+
+
 def cli_main():
     LightningCLI(
         LightningModule,
         LightningDataModule,
         subclass_mode_model=True,
         subclass_mode_data=True,
-        save_config_callback=None,
+        save_config_callback=SaveFitConfigCallback,
+        save_config_kwargs={"overwrite": True},
         seed_everything_default=0,
         trainer_defaults={
             "precision": "16-mixed",

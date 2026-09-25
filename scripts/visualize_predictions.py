@@ -1,8 +1,9 @@
 """Plots side-by-side predictions of the trained regimes on the same validation images.
 
-Each regime's model is rebuilt from the project configs and loaded from the checkpoint
-of the same run that summarize_results.py picks (the latest finished run, or the folder
-given with ``--run <regime>=<folder>``). Inference uses the same sliding window path as
+Each regime's model is rebuilt from the ``config.yaml`` saved in its run folder (so any
+settings overridden at training time are used too) and loaded from that run's checkpoint.
+The run is the one summarize_results.py picks (the latest finished run, or the folder given
+with ``--run <regime>=<folder>``). Inference uses the same sliding window path as
 validation. The grid (image | ground truth | one column per regime) is written to
 ``<out>/qualitative.png``.
 
@@ -12,6 +13,7 @@ Usage:
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -21,42 +23,49 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import LightningCLI  # noqa: E402
+from training.progress import colorize  # noqa: E402
 from scripts.summarize_results import find_run_dir, parse_run_args  # noqa: E402
 from datasets.lightning_data_module import LightningDataModule  # noqa: E402
 from training.lightning_module import LightningModule  # noqa: E402
 
-BASE_CONFIG = ROOT / "configs" / "project" / "base_ade20k_eomt_small_512.yaml"
-
-
-def find_checkpoint(logs: Path, regime: str, chosen: dict[str, Path]) -> Path:
+def find_run(logs: Path, regime: str, chosen: dict[str, Path]) -> tuple[Path, Path]:
     run_dir = find_run_dir(logs, regime, chosen)
-    ckpts = sorted(run_dir.glob("checkpoints/*.ckpt"), key=lambda p: p.stat().st_mtime) if run_dir else []
+    if run_dir is None or not (run_dir / "config.yaml").exists():
+        raise FileNotFoundError(f"No finished run with a config.yaml for {regime} under {logs / regime}")
+    ckpts = sorted(run_dir.glob("checkpoints/*.ckpt"), key=lambda p: p.stat().st_mtime)
     if not ckpts:
-        raise FileNotFoundError(f"No checkpoint found for {regime} under {logs / regime}")
-    return ckpts[-1]
+        raise FileNotFoundError(f"No checkpoint found in {run_dir / 'checkpoints'}")
+    return run_dir, ckpts[-1]
 
 
-def build(regime: str, data_path: str):
-    cli = LightningCLI(
-        LightningModule,
-        LightningDataModule,
-        subclass_mode_model=True,
-        subclass_mode_data=True,
-        save_config_callback=None,
-        run=False,
-        args=[
-            "-c", str(BASE_CONFIG),
-            "-c", str(ROOT / "configs" / "project" / f"{regime}.yaml"),
-            "--data.init_args.path", data_path,
-            "--data.init_args.num_workers", "0",
-            "--trainer.logger", "false",
-        ],
-    )
+def build(run_dir: Path, data_path: str):
+    config = yaml.safe_load((run_dir / "config.yaml").read_text())
+    config.pop("ckpt_path", None)  # a fit-only option, unknown without a subcommand
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml") as config_file:
+        yaml.safe_dump(config, config_file)
+        config_file.flush()
+        cli = LightningCLI(
+            LightningModule,
+            LightningDataModule,
+            subclass_mode_model=True,
+            subclass_mode_data=True,
+            save_config_callback=None,
+            run=False,
+            args=[
+                "-c", config_file.name,
+                "--data.init_args.path", data_path,
+                "--data.init_args.num_workers", "0",
+                "--trainer.logger", "false",
+                "--trainer.accelerator", "auto",
+            ],
+        )
     return cli.model, cli.datamodule
 
 
@@ -68,12 +77,6 @@ def predict(model, img: torch.Tensor) -> np.ndarray:
     crop_logits = model.to_per_pixel_logits_semantic(mask_logits, class_logits_per_layer[-1])
     logits = model.revert_window_logits_semantic(crop_logits, origins, [img.shape[-2:]])
     return logits[0].argmax(0).cpu().numpy()
-
-
-def colorize(label_map: np.ndarray, palette: np.ndarray, ignore_idx: int) -> np.ndarray:
-    rgb = palette[np.clip(label_map, 0, len(palette) - 1)]
-    rgb[label_map == ignore_idx] = 0
-    return rgb
 
 
 def main():
@@ -88,15 +91,14 @@ def main():
     chosen = parse_run_args(args.run)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    palette = np.random.default_rng(0).integers(0, 256, size=(256, 3), dtype=np.uint8)
 
     samples, gts, preds = None, None, {}
     for regime in args.regimes:
-        ckpt_path = find_checkpoint(args.logs, regime, chosen)
+        run_dir, ckpt_path = find_run(args.logs, regime, chosen)
         print(f"{regime}: {ckpt_path}")
-        model, datamodule = build(regime, args.data)
+        model, datamodule = build(run_dir, args.data)
         state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)["state_dict"]
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=True)
         model.to(device).eval()
 
         if samples is None:
@@ -117,8 +119,8 @@ def main():
         len(samples), len(columns), figsize=(3 * len(columns), 3 * len(samples)), squeeze=False
     )
     for row, (img, _) in enumerate(samples):
-        panels = [img.permute(1, 2, 0).numpy(), colorize(gts[row], palette, 255)]
-        panels += [colorize(preds[r][row], palette, 255) for r in args.regimes]
+        panels = [img.permute(1, 2, 0).numpy(), colorize(gts[row])]
+        panels += [colorize(preds[r][row]) for r in args.regimes]
         for col, panel in enumerate(panels):
             axes[row, col].imshow(panel)
             axes[row, col].axis("off")
