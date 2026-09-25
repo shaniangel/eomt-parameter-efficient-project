@@ -10,7 +10,7 @@ Everything not mentioned here is the unchanged upstream code.
   ┌───────────────────────────────────────────────┐
   │ base_ade20k_eomt_small_512.yaml               │  model, data, schedule (shared)
   │ + full.yaml | frozen.yaml | lora.yaml         │  what is trained
-  │ + smoke.yaml (optional)                       │  quick check
+  │ + smoke.yaml (optional)                       │  short learning test
   └───────────────────────┬───────────────────────┘
                           │ read by
                           ▼
@@ -27,20 +27,21 @@ Everything not mentioned here is the unchanged upstream code.
                                     ▼
                                 training/lightning_module.py
                                 training loop, metrics, efficiency
-                                stats, prediction PNGs
+                                stats, progress (training/progress.py)
                                     │
                                     ▼
-                  logs/<regime>/<start time>/
+                  logs/<regime>/<start time>/     (logs_smoke/ for smoke runs)
+                  ├── config.yaml             every setting of the run
                   ├── metrics.csv
-                  ├── efficiency_stats.json
+                  ├── progress/               pictures, curves, text log per epoch
                   ├── checkpoints/
-                  └── predictions/
+                  └── efficiency_stats.json   written when training ends
                           │
-          ┌───────────────┴────────────────┐
-          ▼                                ▼
-  scripts/summarize_results.py     scripts/visualize_predictions.py
-  results/results.md, .csv         results/qualitative.png
-  results/curves_*.png
+          ┌───────────────┼────────────────────────────────┐
+          ▼               ▼                                ▼
+  scripts/check_smoke.py  scripts/summarize_results.py     scripts/visualize_predictions.py
+  PASS/FAIL per regime    results/results.md, .csv,        results/qualitative.png
+  (smoke runs)            results/curves_*.png
 ```
 
 In words:
@@ -152,15 +153,23 @@ while the new LoRA weights stay trainable.
 
 ### `training/lightning_module.py`: measurements and outputs
 
-- **At the start of training** (`on_fit_start`):
-  - Counts total, trainable and backbone parameters.
-  - Measures GFLOPs for one image with `fvcore`.
-  - Starts a timer and resets the GPU peak-memory counter.
-  - Works out the mask-annealing steps (see below).
+- **At the start of training:** counts total, trainable and backbone parameters, works out the
+  mask-annealing steps (see below), then starts a timer and resets the GPU peak-memory counter.
 - **At the end of training** (`on_train_end`): adds the training time, seconds per step and peak
   GPU memory, and writes everything to `efficiency_stats.json` in the run folder. This file is
   only written when training finishes, which is how the result scripts tell finished runs apart
   from crashed ones.
+- **Resumed runs:** each checkpoint also stores the training time so far, the peak memory and the
+  progress history. A resumed run adds to them, so its training time covers all sessions, and
+  `sec_per_step` is measured over the current session only. (The part of an interrupted epoch
+  after its last checkpoint is redone, and not counted twice.)
+- **Progress after every validation epoch.** Six validation batches spread over the validation
+  set are chosen; the first image of each is tracked. Validation isn't shuffled, so these are
+  the same 6 images every epoch. After validation, `training/progress.py` rewrites the run's
+  `progress/` folder: a picture of the images, ground truth and current prediction
+  (`epoch_<n>.png`), the same images across up to 6 epochs so far (`evolution.png`), loss and
+  mIoU curves (`curves.png`), and a text log with the estimated time left (`progress.txt`).
+  Images are stored at most 320 pixels wide, so this costs almost no memory or time.
 - **Mask annealing.** EoMT trains with masked attention and slowly switches it off, one query
   block after another, so the final model does not need it. Upstream hard-codes the steps where
   this happens for its own schedule length. When the config does not give them, we compute them
@@ -172,39 +181,61 @@ while the new LoRA weights stay trainable.
   the paper's metric and the one we report. On the few images of a smoke test, most classes
   never appear, so the standard mIoU is close to 0 even when the model is doing well on what it
   sees. The second mIoU averages only over the classes that do appear. It is a debugging aid.
-- **Prediction images.** Upstream uploads a picture of the first validation image (input,
-  ground truth, prediction) to wandb. We don't use wandb, so these pictures are saved as PNG
-  files in the run's `predictions/` folder, one per epoch and query block.
+- **Prediction images.** Upstream uploads a picture of the first validation image to wandb
+  (`plot_semantic`). We don't use wandb, so validation no longer calls it; the progress files
+  above replace it.
 
 ### `training/csv_logger.py`: one folder per run
 
 The standard Lightning CSV logger names run folders `version_0`, `version_1`, and so on. Ours
 names them after the start time, e.g. `logs/lora/2026-09-26_14-03-12/`, so repeated attempts
-never overwrite each other and are easy to tell apart.
+never overwrite each other and are easy to tell apart. Lightning's logger also deletes an
+existing `metrics.csv` when it opens a folder; ours keeps it, so a resumed run continues its
+curves in the same file.
+
+### Other small changes
+
+- `main.py` saves each run's fully resolved configuration, including command-line overrides, as
+  `config.yaml` in the run folder. The result scripts rebuild models from it and compare runs'
+  settings with it.
+- `datasets/ade20k_semantic.py` has a separate `val_batch_size` (4 in our base config).
+  Validation cuts every image into about 2 crops of 512×512, so it needs more memory per image
+  than training.
 
 ### `configs/project/`
 
-- `base_ade20k_eomt_small_512.yaml`: the shared setup. It covers the model (EoMT-S with
-  DINOv2 ViT-S/14, 100 queries, 3 query blocks), the data (ADE20K at 512×512, batch 16), the
-  paper's optimizer settings (lr 1e-4, layer-wise decay 0.8, weight decay 0.05), the number of
-  epochs, and CSV logging to `logs/`.
+- `base_ade20k_eomt_small_512.yaml`: the shared setup. It covers:
+  - the model: EoMT-S with DINOv2 ViT-S/14 weights and the patch embedding resized to 16×16 as
+    in the paper, 100 queries, 3 query blocks;
+  - the data: ADE20K at 512×512, batch 16, validation batch 4;
+  - the paper's optimizer settings: lr 1e-4, layer-wise decay 0.8, weight decay 0.05;
+  - 31 epochs, and CSV logging to `logs/`.
 - `full.yaml`, `frozen.yaml`, `lora.yaml`: only the regime settings and the run name.
-- `smoke.yaml`: 1 epoch of 20 training batches and 5 validation batches, logging every step.
+- `smoke.yaml`: a short learning test. 5 epochs of 20 training batches, 5 validation batches after
+  each, a warmup shortened to [5, 5] steps so that the backbone and LoRA already train, and output
+  to `logs_smoke/` so smoke runs never mix with real runs.
 
 ### `scripts/`
 
-- `run_experiments.sh [full] [frozen] [lora] [--smoke] [extra args]`: trains the given regimes
-  one after another on the current machine (give each machine one regime to run them in
-  parallel) and saves each console output to
-  `logs/<regime>_<start time>.out`. It stops if a run fails.
+- `run_experiments.sh [full] [frozen] [lora] [--smoke] [--resume <run folder>] [extra args]`:
+  trains the given regimes one after another on the current machine (give each machine one
+  regime to run them in parallel) and saves each console output to
+  `logs/<regime>_<start time>.out`. It stops if a run fails. `--resume` continues an interrupted
+  run from its latest checkpoint, in the same folder.
+- `check_smoke.py`: for each regime's latest smoke run, checks that the training loss went down,
+  the validation mIoU went up, and exactly the right weights changed compared with the pretrained
+  DINOv2 weights (full: backbone changed; frozen: identical; LoRA: backbone identical and every
+  LoRA `lora_B` non-zero). Prints PASS/FAIL and exits with an error code if anything fails.
 - `summarize_results.py`:
   - For each regime, picks the latest finished run (or the one given with `--run`) and reads
     `metrics.csv` and `efficiency_stats.json`.
+  - Compares the runs' `config.yaml` files and stops if they differ in anything besides the
+    regime, run naming and machine-specific paths (`--allow-mismatch` overrides this).
   - Writes the results table (`results.md`, `results.csv`), with the final mIoU and the
     difference from full fine-tuning.
   - Writes the validation mIoU and training loss curves.
-- `visualize_predictions.py`: rebuilds each regime's model from the configs, loads its
-  checkpoint, predicts a few fixed validation images with the same sliding-window method as
+- `visualize_predictions.py`: rebuilds each regime's model from its run's `config.yaml`, loads
+  its checkpoint, predicts a few fixed validation images with the same sliding-window method as
   validation, and draws image | ground truth | full | frozen | LoRA side by side.
 
 ### `tests/test_lora.py`
@@ -221,8 +252,8 @@ Run them with `python -m pytest tests`.
 
 ## Things to keep in mind when reading results
 
-- For the first 500 steps, full and frozen training behave the same, and the LoRA weights do
-  not change yet (in a smoke test of 20 steps they stay exactly at their starting values). The paper's warmup trains
+- In the real runs, for the first 500 steps full and frozen training behave the same, and the
+  LoRA weights do not change yet (the smoke test shortens this warmup). The paper's warmup trains
   only the new parameters (queries and heads) first, then warms up the backbone learning rate
   over the next 1,000 steps. The regimes only start to differ after that.
 - LoRA parameters live inside the backbone blocks, so they get the backbone's learning rate and

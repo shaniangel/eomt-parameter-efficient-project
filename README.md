@@ -4,9 +4,9 @@
 
 This project builds on the official EoMT implementation (the original README follows below).
 EoMT simplifies the segmentation architecture but still fine-tunes the whole ViT backbone. We ask
-whether that is necessary, by training EoMT-S (DINOv2 ViT-S/14) on ADE20K semantic segmentation
-at 512×512 under three regimes that share the same pretrained initialization, data, schedule and
-evaluation:
+whether that is necessary, by training EoMT-S on ADE20K semantic segmentation at 512×512 under
+three regimes that share the same pretrained initialization, data, schedule and evaluation. The
+backbone is DINOv2 ViT-S/14, with its patch embedding resized to 16×16 as in the paper.
 
 | Regime | Trained parameters | Config |
 |---|---|---|
@@ -23,13 +23,19 @@ the code works.
 - `models/lora.py`: `LoRALinear` and `apply_lora`, which wrap the attention projections of chosen ViT blocks.
 - `training/mask_classification_semantic.py`: `freeze_backbone`, `lora_rank`, `lora_alpha` and `lora_modules` options.
 - `training/lightning_module.py`:
-  - writes `efficiency_stats.json` per run (parameter counts, GFLOPs, training time, peak memory);
+  - writes `efficiency_stats.json` per run (parameter counts, training time, peak memory), correct
+    also for resumed runs;
+  - writes progress files after every validation (see [Watching a run](#watching-a-run));
   - derives the mask-annealing steps from the schedule length when they are not given;
-  - logs a present-classes mIoU (`metrics/val_iou_present`) next to the standard one;
-  - saves validation prediction plots as PNGs.
-- `training/csv_logger.py`: names each run folder after its start time.
+  - logs a present-classes mIoU (`metrics/val_iou_present`) next to the standard one.
+- `training/progress.py`: draws the progress pictures, curves and text log.
+- `training/csv_logger.py`: names each run folder after its start time, and keeps earlier
+  metrics when a run is resumed.
+- `datasets/ade20k_semantic.py`: a separate `val_batch_size`, since validation cuts each image into
+  several crops and needs more memory per image.
+- `main.py`: saves each run's full resolved configuration as `config.yaml` in its folder.
 - `configs/project/`: a shared base config plus one overlay per regime and a `smoke.yaml` overlay.
-- `scripts/`: `run_experiments.sh`, `summarize_results.py`, `visualize_predictions.py`.
+- `scripts/`: `run_experiments.sh`, `check_smoke.py`, `summarize_results.py`, `visualize_predictions.py`.
 - `tests/test_lora.py`: CPU unit tests for the LoRA wrapper and freezing.
 
 ### Reproducing
@@ -37,56 +43,116 @@ the code works.
 Install the requirements as in [Installation](#installation), then place `ADEChallengeData2016.zip`
 in `data/ade20k/` (see [Data preparation](#data-preparation), no unzipping needed).
 
+**1. Check the setup (about 15 minutes on one GPU):**
+
 ```bash
-python -m pytest tests                              # unit tests (CPU)
-bash scripts/run_experiments.sh --smoke             # quick check of all three regimes
-bash scripts/run_experiments.sh                     # full runs of all three regimes, one after another
-python scripts/summarize_results.py                 # results/results.md, results/results.csv, curves
-python scripts/visualize_predictions.py             # results/qualitative.png
+python -m pytest tests                  # unit tests (CPU)
+bash scripts/run_experiments.sh --smoke # 5 short epochs per regime, written to logs_smoke/
+python scripts/check_smoke.py           # all checks must PASS
 ```
 
-To train each regime on its own GPU machine, run `bash scripts/run_experiments.sh full`,
-`bash scripts/run_experiments.sh frozen` and `bash scripts/run_experiments.sh lora` on three
-machines (with two machines, give one of them two regimes, e.g. `frozen lora`). Then copy the
-`logs/<regime>/` folders into `logs/` on one machine and run the two result scripts there.
-Training times are only comparable if the machines have the same GPU model and nothing else
-runs on them.
+The smoke test trains each regime for 5 epochs of 20 steps, with the real batch size and image
+size, and validates on 20 images after each epoch. Its warmup is shortened so that the backbone and
+LoRA weights already train. `check_smoke.py` checks, for every regime, that:
+- the training loss went down;
+- the validation mIoU went up;
+- exactly the right weights changed: full changes the backbone, frozen keeps it identical to the
+  pretrained weights, and LoRA keeps it identical while its adapters learn.
 
-Extra arguments go to `main.py`, e.g. `--data.path /path/to/ade20k` or `--trainer.max_epochs 8`.
-A single regime can also be trained with:
+Look at `logs_smoke/<regime>/<folder>/progress/evolution.png` to see the predictions improve over
+the 5 epochs. `efficiency_stats.json` in each folder gives the peak GPU memory and seconds per step.
+
+**2. Train.** Each regime can run on its own GPU machine:
 
 ```bash
-python main.py fit -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml
+bash scripts/run_experiments.sh full    # machine A
+bash scripts/run_experiments.sh frozen  # machine B
+bash scripts/run_experiments.sh lora    # machine C
 ```
 
-Each run writes to its own folder, named after its start time, e.g. `logs/lora/2026-09-26_14-03-12/`.
-The folder holds `metrics.csv`, `efficiency_stats.json`, `checkpoints/` and `predictions/`. The
-console output goes to `logs/<regime>_<start time>.out`. The result scripts use the latest
-*finished* run of each regime; pick another with `--run lora=logs/lora/<folder>`.
+With two machines, give one of them two regimes (e.g. `frozen lora`); with one, run the script
+without a regime to train all three one after another. Training times are only comparable if the
+machines have the same GPU model and nothing else runs on them. Extra arguments go to `main.py`,
+e.g. `--data.path /path/to/ade20k`.
 
-To re-evaluate a checkpoint:
+**3. Collect the results.** Copy the `logs/<regime>/` folders into `logs/` on one machine, then:
 
 ```bash
-python main.py validate -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml --ckpt_path logs/lora/<folder>/checkpoints/<file>.ckpt
+python scripts/summarize_results.py     # results/results.md, results/results.csv, curves
+python scripts/visualize_predictions.py # results/qualitative.png
+```
+
+### Run folders
+
+Each run writes to its own folder, named after its start time, e.g. `logs/lora/2026-09-26_14-03-12/`:
+
+| File | Content |
+|---|---|
+| `config.yaml` | every setting the run used, including command-line overrides |
+| `metrics.csv` | losses, mIoU and learning rates |
+| `progress/` | pictures, curves and a text log, updated after every epoch |
+| `checkpoints/` | the latest checkpoint, saved at the end of every epoch |
+| `efficiency_stats.json` | parameter counts, training time, seconds per step, peak GPU memory; written when training ends |
+
+The console output goes to `logs/<regime>_<start time>.out`. The result scripts use the latest
+*finished* run of each regime (one with `efficiency_stats.json`); pick another with
+`--run lora=logs/lora/<folder>`. `summarize_results.py` stops if the chosen runs differ in any
+setting besides the regime itself (compared through their `config.yaml`); `--allow-mismatch`
+overrides this.
+
+### Watching a run
+
+After every epoch (about 20 minutes for full fine-tuning), the run's `progress/` folder is updated:
+
+| File | Content |
+|---|---|
+| `progress.txt` | one line per epoch: training loss, validation mIoU, elapsed time, estimated time left |
+| `curves.png` | training loss and validation mIoU per epoch |
+| `epoch_<n>.png` | 6 fixed validation images, their ground truth and the prediction after epoch n |
+| `evolution.png` | the predictions for those 6 images across up to 6 epochs so far, first to latest |
+
+Check a run from the terminal with `cat logs/<regime>/<folder>/progress/progress.txt`. To view the
+pictures, copy the folder to your own computer, e.g.
+`scp -r <user>@<machine>:~/eomt-parameter-efficient-project/logs/full/<folder>/progress .`.
+On a healthy run the loss falls and the mIoU rises within the first few epochs, and the
+predictions start to follow object outlines.
+
+### Resuming an interrupted run
+
+A checkpoint is saved at the end of every epoch. To continue an interrupted run in its own folder,
+with the same settings:
+
+```bash
+bash scripts/run_experiments.sh lora --resume logs/lora/<folder>
+```
+
+Metrics, progress files and the training time continue from the last checkpoint, so at most one
+epoch is repeated.
+
+### Re-evaluating a checkpoint
+
+```bash
+python main.py validate -c logs/lora/<folder>/config.yaml --trainer.logger false --ckpt_path logs/lora/<folder>/checkpoints/<file>.ckpt
 ```
 
 ### Choosing the batch size and number of epochs
 
-1. Run the smoke test. It trains each regime for 20 steps with the real batch size and image
-   size, so it shows whether memory fits and how fast training is.
-2. **Batch size:** we keep the paper's batch size of 16. If the smoke test runs out of GPU memory,
-   add `--data.init_args.batch_size 8 --trainer.accumulate_grad_batches 2`. This keeps the
-   effective batch at 16, so the learning rate and schedule stay the same.
-3. **Epochs:** read `sec_per_step` from `logs/full/<folder>/efficiency_stats.json`. One epoch is
-   20,210 / 16 ≈ 1,263 steps, so `max_epochs ≈ hours available × 3600 / (sec_per_step × 1263)`.
-   Use about 90% of that to leave room for validation. Use the same value for all three regimes
-   (full fine-tuning is the slowest), and set it in the base config or with `--trainer.max_epochs`.
+We use the paper's batch size of 16 and 31 epochs. On an NVIDIA A10 (24 GB), full fine-tuning
+peaks under 10 GB and takes about 0.73 s per step, i.e. about 20 minutes per epoch including
+validation and 10-11 hours in total. On other hardware:
+- **Memory:** if the smoke test runs out of GPU memory in training, add
+  `--data.init_args.batch_size 8 --trainer.accumulate_grad_batches 2`. This keeps the effective
+  batch at 16, so the learning rate and schedule stay the same. If it runs out in validation,
+  lower `--data.init_args.val_batch_size`.
+- **Time:** one epoch is 20,210 / 16 ≈ 1,263 steps, so a run takes about
+  `max_epochs × 1263 × sec_per_step`, plus about 10% for validation. Use the same `max_epochs`
+  for all three regimes.
 
 ### Setup and deviations from the paper
 
 - **Same as the paper:** AdamW with lr 1e-4, layer-wise lr decay 0.8, weight decay 0.05, poly decay
   0.9, two-stage warmup (500 steps for the new parameters, then 1000 for the backbone), mask annealing
-  (steps scaled to our schedule) and L2 = 3 query blocks for ViT-S.
+  (steps scaled to our schedule), L2 = 3 query blocks for ViT-S, and patch size 16.
 - **Same schedule as the paper:** batch size 16 and 31 epochs. On one NVIDIA A10 (24 GB) this
   takes about 10-11 hours for full fine-tuning, using under 10 GB of GPU memory.
 - **Different from the paper:** the smaller ViT-S backbone (the paper's main results use
