@@ -1,12 +1,12 @@
 # Shared setup for all training regimes: EoMT-S (DINOv2 ViT-S/14) on ADE20K semantic at
-# 512x512, following the paper's ADE20K recipe with a shorter schedule and a smaller
-# batch that fits one 24 GB GPU. Stack a regime config on top of this one, e.g.:
+# 512x512, following the paper's ADE20K recipe (batch size 16, lr 1e-4) with a shorter
+# schedule (the paper trains 31 epochs). Stack a regime config on top of this one, e.g.:
 #   python main.py fit -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml
 trainer:
   max_epochs: 12
   check_val_every_n_epoch: 1
   logger:
-    class_path: lightning.pytorch.loggers.CSVLogger
+    class_path: training.csv_logger.TimestampedCSVLogger
     init_args:
       save_dir: logs
 model:
@@ -30,7 +30,9 @@ data:
   class_path: datasets.ade20k_semantic.ADE20KSemantic
   init_args:
     path: data/ade20k
-    batch_size: 8
+    # Paper value. If it does not fit in GPU memory, use batch_size 8 together with
+    # --trainer.accumulate_grad_batches 2, which gives the same effective batch of 16
+    batch_size: 16
     num_workers: 8
     img_size: [512, 512]
 compile_disabled: true

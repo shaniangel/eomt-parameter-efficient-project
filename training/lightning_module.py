@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Optional, cast
 import lightning
 from lightning.fabric.utilities import rank_zero_info
-from lightning.pytorch.loggers import WandbLogger
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -27,7 +26,6 @@ from torchmetrics.functional.detection._panoptic_quality_common import (
     _get_color_areas,
     _calculate_iou,
 )
-import wandb
 from PIL import Image
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
@@ -127,9 +125,11 @@ class LightningModule(lightning.LightningModule):
         self.train_start_time = time.perf_counter()
 
     def on_train_end(self):
-        self.efficiency_stats["train_time_sec"] = (
-            time.perf_counter() - self.train_start_time
-        )
+        train_time = time.perf_counter() - self.train_start_time
+        self.efficiency_stats["train_time_sec"] = train_time
+        self.efficiency_stats["train_steps"] = self.global_step
+        # Includes validation time, so it slightly overestimates the pure step time
+        self.efficiency_stats["sec_per_step"] = train_time / max(1, self.global_step)
         if torch.cuda.is_available():
             self.efficiency_stats["peak_gpu_mem_gb"] = (
                 torch.cuda.max_memory_allocated(self.device) / 1024**3
@@ -141,8 +141,9 @@ class LightningModule(lightning.LightningModule):
             path.write_text(json.dumps(self.efficiency_stats, indent=2))
 
     def _set_default_attn_mask_annealing_steps(self):
-        # Same fractions of training as the upstream configs: block i anneals during
-        # 1/6 of training, with starts evenly spaced between 1/6 and 2/3 of training
+        # Same fractions of training as the upstream configs: each query block anneals
+        # during 1/6 of training, with starts evenly spaced between 1/6 and 2/3 of it.
+        # ViT-S/B (3 blocks) start at 1/6, 5/12, 2/3; ViT-L (4 blocks) at 1/6, 1/3, 1/2, 2/3
         total_steps = self.trainer.estimated_stepping_batches
         num_blocks = self.network.num_blocks
         starts = torch.linspace(1 / 6, 2 / 3, num_blocks)
@@ -676,9 +677,7 @@ class LightningModule(lightning.LightningModule):
 
         block_postfix = self.block_postfix(block_idx)
         name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-        if isinstance(self.trainer.logger, WandbLogger):
-            self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
-        elif self.trainer.logger is not None and self.trainer.is_global_zero:
+        if self.trainer.logger is not None and self.trainer.is_global_zero:
             path = Path(self.trainer.log_dir, "predictions", f"{name}_epoch_{self.current_epoch}.png")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(buf.getvalue())
