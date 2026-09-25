@@ -4,10 +4,12 @@
 # ---------------------------------------------------------------
 
 
+import logging
 from typing import List, Optional
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.lora import apply_lora
 from training.mask_classification_loss import MaskClassificationLoss
 from training.lightning_module import LightningModule
 
@@ -41,6 +43,10 @@ class MaskClassificationSemantic(LightningModule):
         ckpt_path: Optional[str] = None,
         delta_weights: bool = False,
         load_ckpt_class_head: bool = True,
+        freeze_backbone: bool = False,
+        lora_rank: int = 0,
+        lora_alpha: Optional[float] = None,
+        lora_modules: List[str] = ["qkv", "proj"],
     ):
         super().__init__(
             network=network,
@@ -80,6 +86,24 @@ class MaskClassificationSemantic(LightningModule):
         )
 
         self.init_metrics_semantic(ignore_idx, self.network.num_blocks + 1 if self.network.masked_attn_enabled else 1)
+
+        backbone = self.network.encoder.backbone
+        if freeze_backbone:
+            backbone.requires_grad_(False)
+
+        if lora_rank > 0:
+            # Local LoRA: adapt only the final blocks, where the queries are processed
+            num_added = apply_lora(
+                backbone,
+                block_indices=range(-self.network.num_blocks, 0),
+                rank=lora_rank,
+                alpha=lora_alpha if lora_alpha is not None else lora_rank,
+                modules=lora_modules,
+            )
+            logging.info(
+                f"Added {num_added:,} LoRA parameters (rank {lora_rank}) to the last "
+                f"{self.network.num_blocks} backbone blocks"
+            )
 
     def eval_step(
         self,

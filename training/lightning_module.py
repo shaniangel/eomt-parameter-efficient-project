@@ -8,10 +8,14 @@
 # All used under the Apache 2.0 License.
 # ---------------------------------------------------------------
 
+import json
 import math
+import time
+from pathlib import Path
 from typing import Optional, cast
 import lightning
 from lightning.fabric.utilities import rank_zero_info
+from lightning.pytorch.loggers import WandbLogger
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -98,6 +102,75 @@ class LightningModule(lightning.LightningModule):
             self._raise_on_incompatible(incompatible_keys, load_ckpt_class_head)
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
+
+    def on_fit_start(self):
+        if self.attn_mask_annealing_enabled and self.attn_mask_annealing_start_steps is None:
+            self._set_default_attn_mask_annealing_steps()
+
+        num_total = sum(p.numel() for p in self.parameters())
+        num_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        backbone_params = list(self.network.encoder.backbone.parameters())
+        self.efficiency_stats = {
+            "params_total": num_total,
+            "params_trainable": num_trainable,
+            "params_trainable_pct": 100.0 * num_trainable / num_total,
+            "params_backbone": sum(p.numel() for p in backbone_params),
+            "params_backbone_trainable": sum(
+                p.numel() for p in backbone_params if p.requires_grad
+            ),
+            "gflops": self._count_gflops(),
+        }
+        rank_zero_info(f"Efficiency stats: {self.efficiency_stats}")
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+        self.train_start_time = time.perf_counter()
+
+    def on_train_end(self):
+        self.efficiency_stats["train_time_sec"] = (
+            time.perf_counter() - self.train_start_time
+        )
+        if torch.cuda.is_available():
+            self.efficiency_stats["peak_gpu_mem_gb"] = (
+                torch.cuda.max_memory_allocated(self.device) / 1024**3
+            )
+
+        if self.trainer.logger is not None and self.trainer.is_global_zero:
+            path = Path(self.trainer.log_dir, "efficiency_stats.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self.efficiency_stats, indent=2))
+
+    def _set_default_attn_mask_annealing_steps(self):
+        # Same fractions of training as the upstream configs: block i anneals during
+        # 1/6 of training, with starts evenly spaced between 1/6 and 2/3 of training
+        total_steps = self.trainer.estimated_stepping_batches
+        num_blocks = self.network.num_blocks
+        starts = torch.linspace(1 / 6, 2 / 3, num_blocks)
+        self.attn_mask_annealing_start_steps = [round(total_steps * f) for f in starts.tolist()]
+        self.attn_mask_annealing_end_steps = [
+            round(total_steps * (f + 1 / 6)) for f in starts.tolist()
+        ]
+        rank_zero_info(
+            f"Attention mask annealing: start steps {self.attn_mask_annealing_start_steps}, "
+            f"end steps {self.attn_mask_annealing_end_steps}"
+        )
+
+    @torch.no_grad()
+    def _count_gflops(self):
+        from fvcore.nn import FlopCountAnalysis
+
+        was_training = self.network.training
+        self.network.eval()
+        try:
+            imgs = torch.zeros(1, 3, *self.img_size, device=self.device)
+            flops = FlopCountAnalysis(self.network, imgs)
+            flops.unsupported_ops_warnings(False).uncalled_modules_warnings(False)
+            return flops.total() / 1e9
+        except Exception as e:
+            logging.warning(f"GFLOPs count failed: {e}")
+            return None
+        finally:
+            self.network.train(was_training)
 
     def configure_optimizers(self):
         encoder_param_names = {
@@ -238,6 +311,7 @@ class LightningModule(lightning.LightningModule):
                     validate_args=False,
                     ignore_index=ignore_idx,
                     average=None,
+                    zero_division=float("nan"),
                 )
                 for _ in range(num_blocks)
             ]
@@ -405,10 +479,17 @@ class LightningModule(lightning.LightningModule):
                         iou,
                     )
 
-            iou_all = float(iou_per_class.mean())
+            # Classes absent from both targets and predictions are NaN: they count as 0
+            # in iou_all (as upstream) and are skipped in iou_present, which is more
+            # informative when validating on a few images only
+            iou_all = float(iou_per_class.nan_to_num(0.0).mean())
             self.log(
                 f"metrics/{log_prefix}_iou_all{block_postfix}",
                 iou_all,
+            )
+            self.log(
+                f"metrics/{log_prefix}_iou_present{block_postfix}",
+                float(iou_per_class.nanmean()),
             )
 
     def _on_eval_epoch_end_instance(self, log_prefix):
@@ -595,7 +676,12 @@ class LightningModule(lightning.LightningModule):
 
         block_postfix = self.block_postfix(block_idx)
         name = f"{log_prefix}_pred_{batch_idx}{block_postfix}"
-        self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
+        if isinstance(self.trainer.logger, WandbLogger):
+            self.trainer.logger.experiment.log({name: [wandb.Image(Image.open(buf))]})
+        elif self.trainer.logger is not None and self.trainer.is_global_zero:
+            path = Path(self.trainer.log_dir, "predictions", f"{name}_epoch_{self.current_epoch}.png")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(buf.getvalue())
 
     @torch.compiler.disable
     def scale_img_size_semantic(self, size: tuple[int, int]):
