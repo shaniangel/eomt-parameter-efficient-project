@@ -1,3 +1,78 @@
+# Parameter-Efficient Optimization of Encoder-Only Vision Transformers for Segmentation
+
+*Bar Muller, Shani Angel, Guy Shloush, Yehonatan Pelleg, Daniel Ishai Aharonovitz*
+
+This project builds on the official EoMT implementation (the original README follows below).
+EoMT simplifies the segmentation architecture but still fine-tunes the whole ViT backbone. We ask
+whether that is necessary, by training EoMT-S (DINOv2 ViT-S/14) on ADE20K semantic segmentation
+at 512×512 under three regimes that share the same pretrained initialization, data, schedule and
+evaluation:
+
+| Regime | Trained parameters | Config |
+|---|---|---|
+| Full fine-tuning | backbone, queries, heads | `configs/project/full.yaml` |
+| Frozen backbone | queries, heads | `configs/project/frozen.yaml` |
+| Local LoRA | queries, heads, rank-8 LoRA on `qkv`/`proj` of the last `num_blocks` (= 3) blocks, where the queries are processed | `configs/project/lora.yaml` |
+
+We report mIoU, the number and share of trainable parameters, training time, peak GPU memory,
+convergence curves and qualitative examples.
+
+### What we added to the upstream code
+
+- `models/lora.py`: `LoRALinear` and `apply_lora`, which wrap the attention projections of chosen ViT blocks.
+- `training/mask_classification_semantic.py`: `freeze_backbone`, `lora_rank`, `lora_alpha` and `lora_modules` options.
+- `training/lightning_module.py`:
+  - writes `efficiency_stats.json` per run (parameter counts, GFLOPs, training time, peak memory);
+  - derives the mask-annealing steps from the schedule length when they are not given;
+  - logs a present-classes mIoU (`metrics/val_iou_present`) next to the standard one;
+  - saves validation prediction plots as PNGs when not logging to wandb.
+- `configs/project/`: a shared base config plus one overlay per regime and a `smoke.yaml` overlay.
+- `scripts/`: `run_experiments.sh`, `summarize_results.py`, `visualize_predictions.py`.
+- `tests/test_lora.py`: CPU unit tests for the LoRA wrapper and freezing.
+
+### Reproducing
+
+Install the requirements as in [Installation](#installation), then place `ADEChallengeData2016.zip`
+in `data/ade20k/` (see [Data preparation](#data-preparation), no unzipping needed).
+
+```bash
+python -m pytest tests                                  # unit tests (CPU)
+bash scripts/run_experiments.sh --smoke --gpus 0,1      # quick check of all three regimes
+bash scripts/run_experiments.sh --gpus 0,1              # full runs: full on GPU 0; frozen, then lora on GPU 1
+python scripts/summarize_results.py                     # results/results.md, results/results.csv, curves
+python scripts/visualize_predictions.py                 # results/qualitative.png
+```
+
+Pass `--gpus 0` to run everything on one GPU. Extra arguments go to `main.py`, e.g.
+`--data.path /path/to/ade20k` or `--trainer.max_epochs 8`. A single regime can also be trained with:
+
+```bash
+python main.py fit -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml
+```
+
+Each run writes to `logs/<regime>/version_<n>/`: `metrics.csv`, `efficiency_stats.json`, `checkpoints/`
+and `predictions/`. To re-evaluate a checkpoint:
+
+```bash
+python main.py validate -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml --ckpt_path logs/lora/version_0/checkpoints/<file>.ckpt
+```
+
+### Setup and deviations from the paper
+
+- **Same as the paper:** AdamW with lr 1e-4, layer-wise lr decay 0.8, weight decay 0.05, poly decay
+  0.9, two-stage warmup (500 steps for the new parameters, then 1000 for the backbone), mask annealing
+  (steps scaled to our schedule) and L2 = 3 query blocks for ViT-S.
+- **Reduced to fit our compute:** batch size 8 instead of 16, and 12 epochs by default instead of
+  31 (set in the base config). All regimes use the same hyperparameters; none were tuned per regime.
+- **LoRA learning rate:** the LoRA parameters sit inside the backbone blocks, so they share the
+  backbone's learning rate and warmup.
+
+### Results
+
+To be filled in from `results/results.md`.
+
+---
+
 # Your ViT is Secretly an Image Segmentation Model  
 [![Papers with Code: SOTA on BRAVO (OOD)](https://paperswithcode.co/api/v1/papers/2503.19108/leaderboard-badge.svg?eval=640&live=1)](https://paperswithcode.co/benchmark/bravo-ood?task=image-segmentation&eval=640)
 [![Papers with Code: SOTA on COCO 2017 Panoptic Segmentation](https://paperswithcode.co/api/v1/papers/2503.19108/leaderboard-badge.svg?eval=6260&live=1)](https://paperswithcode.co/benchmark/coco-2017-panoptic-segmentation?task=image-segmentation&eval=6260)

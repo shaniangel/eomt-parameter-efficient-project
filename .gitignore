@@ -181,3 +181,5 @@ cython_debug/
 
 .idea/
 pilot_logs/
+logs/
+data/
