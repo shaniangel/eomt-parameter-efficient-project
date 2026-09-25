@@ -15,7 +15,8 @@ evaluation:
 | Local LoRA | queries, heads, rank-8 LoRA on `qkv`/`proj` of the last `num_blocks` (= 3) blocks, where the queries are processed | `configs/project/lora.yaml` |
 
 We report mIoU, the number and share of trainable parameters, training time, peak GPU memory,
-convergence curves and qualitative examples.
+convergence curves and qualitative examples. [IMPLEMENTATION.md](IMPLEMENTATION.md) explains how
+the code works.
 
 ### What we added to the upstream code
 
@@ -25,7 +26,8 @@ convergence curves and qualitative examples.
   - writes `efficiency_stats.json` per run (parameter counts, GFLOPs, training time, peak memory);
   - derives the mask-annealing steps from the schedule length when they are not given;
   - logs a present-classes mIoU (`metrics/val_iou_present`) next to the standard one;
-  - saves validation prediction plots as PNGs when not logging to wandb.
+  - saves validation prediction plots as PNGs.
+- `training/csv_logger.py`: names each run folder after its start time.
 - `configs/project/`: a shared base config plus one overlay per regime and a `smoke.yaml` overlay.
 - `scripts/`: `run_experiments.sh`, `summarize_results.py`, `visualize_predictions.py`.
 - `tests/test_lora.py`: CPU unit tests for the LoRA wrapper and freezing.
@@ -36,34 +38,54 @@ Install the requirements as in [Installation](#installation), then place `ADECha
 in `data/ade20k/` (see [Data preparation](#data-preparation), no unzipping needed).
 
 ```bash
-python -m pytest tests                                  # unit tests (CPU)
-bash scripts/run_experiments.sh --smoke --gpus 0,1      # quick check of all three regimes
-bash scripts/run_experiments.sh --gpus 0,1              # full runs: full on GPU 0; frozen, then lora on GPU 1
-python scripts/summarize_results.py                     # results/results.md, results/results.csv, curves
-python scripts/visualize_predictions.py                 # results/qualitative.png
+python -m pytest tests                              # unit tests (CPU)
+bash scripts/run_experiments.sh --smoke             # quick check of all three regimes
+bash scripts/run_experiments.sh                     # full runs of all three regimes, one after another
+python scripts/summarize_results.py                 # results/results.md, results/results.csv, curves
+python scripts/visualize_predictions.py             # results/qualitative.png
 ```
 
-Pass `--gpus 0` to run everything on one GPU. Extra arguments go to `main.py`, e.g.
-`--data.path /path/to/ade20k` or `--trainer.max_epochs 8`. A single regime can also be trained with:
+With two machines, split the regimes: run `bash scripts/run_experiments.sh full` on one and
+`bash scripts/run_experiments.sh frozen lora` on the other. Then copy the `logs/<regime>/` folders
+into `logs/` on one machine and run the two result scripts there.
+
+Extra arguments go to `main.py`, e.g. `--data.path /path/to/ade20k` or `--trainer.max_epochs 8`.
+A single regime can also be trained with:
 
 ```bash
 python main.py fit -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml
 ```
 
-Each run writes to `logs/<regime>/version_<n>/`: `metrics.csv`, `efficiency_stats.json`, `checkpoints/`
-and `predictions/`. To re-evaluate a checkpoint:
+Each run writes to its own folder, named after its start time, e.g. `logs/lora/2026-09-26_14-03-12/`.
+The folder holds `metrics.csv`, `efficiency_stats.json`, `checkpoints/` and `predictions/`. The
+console output goes to `logs/<regime>_<start time>.out`. The result scripts use the latest
+*finished* run of each regime; pick another with `--run lora=logs/lora/<folder>`.
+
+To re-evaluate a checkpoint:
 
 ```bash
-python main.py validate -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml --ckpt_path logs/lora/version_0/checkpoints/<file>.ckpt
+python main.py validate -c configs/project/base_ade20k_eomt_small_512.yaml -c configs/project/lora.yaml --ckpt_path logs/lora/<folder>/checkpoints/<file>.ckpt
 ```
+
+### Choosing the batch size and number of epochs
+
+1. Run the smoke test. It trains each regime for 20 steps with the real batch size and image
+   size, so it shows whether memory fits and how fast training is.
+2. **Batch size:** we keep the paper's batch size of 16. If the smoke test runs out of GPU memory,
+   add `--data.init_args.batch_size 8 --trainer.accumulate_grad_batches 2`. This keeps the
+   effective batch at 16, so the learning rate and schedule stay the same.
+3. **Epochs:** read `sec_per_step` from `logs/full/<folder>/efficiency_stats.json`. One epoch is
+   20,210 / 16 ≈ 1,263 steps, so `max_epochs ≈ hours available × 3600 / (sec_per_step × 1263)`.
+   Use about 90% of that to leave room for validation. Use the same value for all three regimes
+   (full fine-tuning is the slowest), and set it in the base config or with `--trainer.max_epochs`.
 
 ### Setup and deviations from the paper
 
 - **Same as the paper:** AdamW with lr 1e-4, layer-wise lr decay 0.8, weight decay 0.05, poly decay
   0.9, two-stage warmup (500 steps for the new parameters, then 1000 for the backbone), mask annealing
   (steps scaled to our schedule) and L2 = 3 query blocks for ViT-S.
-- **Reduced to fit our compute:** batch size 8 instead of 16, and 12 epochs by default instead of
-  31 (set in the base config). All regimes use the same hyperparameters; none were tuned per regime.
+- **Reduced to fit our compute:** fewer epochs than the paper's 31 (12 by default, chosen as
+  described above). All regimes use the same hyperparameters; none were tuned per regime.
 - **LoRA learning rate:** the LoRA parameters sit inside the backbone blocks, so they share the
   backbone's learning rate and warmup.
 
