@@ -27,6 +27,9 @@ for arg in "$@"; do
 done
 [[ ${#regimes[@]} -eq 0 ]] && regimes=(full frozen lora)
 
+# Lets PyTorch reuse freed GPU memory between training and validation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 mkdir -p logs
 for regime in "${regimes[@]}"; do
   out="logs/${regime}_$(date '+%F_%H-%M-%S').out"

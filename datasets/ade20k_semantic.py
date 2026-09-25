@@ -5,7 +5,7 @@
 
 
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 from torch.utils.data import DataLoader
 
 from datasets.lightning_data_module import LightningDataModule
@@ -26,6 +26,7 @@ class ADE20KSemantic(LightningDataModule):
         color_jitter_enabled=True,
         scale_range=(0.5, 2.0),
         check_empty_targets=True,
+        val_batch_size: Optional[int] = None,
     ) -> None:
         super().__init__(
             path=path,
@@ -36,6 +37,9 @@ class ADE20KSemantic(LightningDataModule):
             check_empty_targets=check_empty_targets,
         )
         self.save_hyperparameters(ignore=["_class_path"])
+
+        # Validation splits each image into several crops, so it can need a smaller batch
+        self.val_batch_size = val_batch_size if val_batch_size is not None else batch_size
 
         self.transforms = Transforms(
             img_size=img_size,
@@ -100,5 +104,5 @@ class ADE20KSemantic(LightningDataModule):
         return DataLoader(
             self.val_dataset,
             collate_fn=self.eval_collate,
-            **self.dataloader_kwargs,
+            **{**self.dataloader_kwargs, "batch_size": self.val_batch_size},
         )
