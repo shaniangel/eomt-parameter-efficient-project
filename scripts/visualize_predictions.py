@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from main import LightningCLI  # noqa: E402
 from training.progress import colorize  # noqa: E402
-from scripts.summarize_results import find_run_dir, parse_run_args  # noqa: E402
+from scripts.summarize_results import find_regimes, find_run_dir, parse_run_args  # noqa: E402
 from datasets.lightning_data_module import LightningDataModule  # noqa: E402
 from training.lightning_module import LightningModule  # noqa: E402
 
@@ -84,11 +84,12 @@ def main():
     parser.add_argument("--logs", type=Path, default=Path("logs"))
     parser.add_argument("--data", default="data/ade20k")
     parser.add_argument("--out", type=Path, default=Path("results"))
-    parser.add_argument("--regimes", nargs="+", default=["full", "frozen", "lora"])
+    parser.add_argument("--regimes", nargs="+", help="default: all regime folders in --logs")
     parser.add_argument("--indices", nargs="+", type=int, default=[0, 100, 200, 300, 400, 500])
     parser.add_argument("--run", action="append", default=[], metavar="REGIME=FOLDER")
     args = parser.parse_args()
     chosen = parse_run_args(args.run)
+    args.regimes = args.regimes or find_regimes(args.logs)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

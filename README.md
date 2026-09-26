@@ -75,12 +75,28 @@ without a regime to train all three one after another. Training times are only c
 machines have the same GPU model and nothing else runs on them. Extra arguments go to `main.py`,
 e.g. `--data.path /path/to/ade20k`.
 
+**Optional: LoRA rank ablation.** `lora.yaml` uses rank 8. `lora_r2.yaml`, `lora_r4.yaml`,
+`lora_r16.yaml` and `lora_r32.yaml` are the same regime with another rank (alpha = rank each time,
+so only the rank changes). Train them like any regime, e.g. `bash scripts/run_experiments.sh lora_r2`.
+Each takes about as long as the rank-8 run, and needs the same 31 epochs to be comparable.
+
+| Config | LoRA rank | LoRA parameters | Share of backbone |
+|---|---|---|---|
+| `lora_r2.yaml` | 2 | 13,824 | 0.06% |
+| `lora_r4.yaml` | 4 | 27,648 | 0.13% |
+| `lora.yaml` | 8 | 55,296 | 0.25% |
+| `lora_r16.yaml` | 16 | 110,592 | 0.50% |
+| `lora_r32.yaml` | 32 | 221,184 | 1.0% |
+
 **3. Collect the results.** Copy the `logs/<regime>/` folders into `logs/` on one machine, then:
 
 ```bash
 python scripts/summarize_results.py     # results/results.md, results/results.csv, curves
 python scripts/visualize_predictions.py # results/qualitative.png
 ```
+
+Both include every regime folder found in `logs/`, rank ablations included; pass
+`--regimes full frozen lora` to limit them.
 
 ### Run folders
 

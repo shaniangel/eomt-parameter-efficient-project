@@ -2,10 +2,12 @@
 # Trains the given regimes one after another on this machine's GPU, with identical settings.
 #
 # Usage:
-#   bash scripts/run_experiments.sh [full] [frozen] [lora] [--smoke] [extra main.py args...]
+#   bash scripts/run_experiments.sh [regime...] [--smoke] [extra main.py args...]
 #   bash scripts/run_experiments.sh <regime> --resume logs/<regime>/<run folder>
 #
-# With no regime given, all three are run. To use one GPU machine per regime, run e.g.:
+# A regime is any config in configs/project/ other than the base and smoke ones: full, frozen,
+# lora (rank 8), and the LoRA rank ablations lora_r2, lora_r4, lora_r16, lora_r32.
+# With no regime given, full, frozen and lora are run. To use one GPU machine per regime, run e.g.:
 #   machine A:  bash scripts/run_experiments.sh full
 #   machine B:  bash scripts/run_experiments.sh frozen
 #   machine C:  bash scripts/run_experiments.sh lora
@@ -25,10 +27,20 @@ resume_dir=""
 extra=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    full|frozen|lora) regimes+=("$1"); shift ;;
     --smoke) smoke=(-c configs/project/smoke.yaml); shift ;;
     --resume) resume_dir="${2%/}"; shift 2 ;;
-    *) extra+=("$1"); shift ;;
+    -*) extra+=("$1"); shift
+      # an option's value, e.g. "--data.init_args.path data/ade20k"
+      if [[ $# -gt 0 && "$1" != -* && "$1" != *=* && ! -f "configs/project/$1.yaml" ]]; then
+        extra+=("$1"); shift
+      fi ;;
+    base_ade20k_eomt_small_512|smoke) echo "$1 is not a regime"; exit 1 ;;
+    *)
+      if [[ ! -f "configs/project/$1.yaml" ]]; then
+        echo "Unknown regime '$1': no configs/project/$1.yaml"
+        exit 1
+      fi
+      regimes+=("$1"); shift ;;
   esac
 done
 [[ ${#regimes[@]} -eq 0 ]] && regimes=(full frozen lora)

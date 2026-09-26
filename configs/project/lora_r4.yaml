@@ -1,0 +1,12 @@
+# Rank ablation of regime 3: local LoRA as in lora.yaml (rank 8), but with rank 4.
+# alpha = rank keeps the scale alpha / rank at 1, so only the rank changes
+trainer:
+  logger:
+    init_args:
+      name: lora_r4
+model:
+  init_args:
+    freeze_backbone: true
+    lora_rank: 4
+    lora_alpha: 4
+    lora_modules: [qkv, proj]

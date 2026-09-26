@@ -1,6 +1,8 @@
 """Builds the results table and convergence plots from the CSVLogger outputs.
 
-For every regime it reads the latest finished run in ``<logs>/<regime>/`` (a run folder
+By default the regimes are all folders in ``<logs>/`` (full, frozen, lora and any LoRA rank
+ablations such as lora_r2). For every regime it reads the latest finished run in
+``<logs>/<regime>/`` (a run folder
 with ``efficiency_stats.json``, which is written when training ends), or the folder given
 with ``--run <regime>=<folder>``. It checks that the runs used the same settings (from each
 run's ``config.yaml``) apart from the regime itself, then writes to ``<out>/``:
@@ -37,6 +39,19 @@ REGIME_SPECIFIC_SETTINGS = (
     "data.init_args.num_workers",
     "ckpt_path",
 )
+
+
+def find_regimes(logs: Path) -> list[str]:
+    """The regime folders in ``logs``: full, frozen, lora, then LoRA ablations by rank."""
+    def order(name: str):
+        main = ["full", "frozen", "lora"]
+        if name in main:
+            return (main.index(name), 0, name)
+        rank = name.removeprefix("lora_r")
+        return (len(main), int(rank) if rank.isdigit() else 0, name)
+
+    names = [p.name for p in logs.iterdir() if p.is_dir()] if logs.is_dir() else []
+    return sorted(names, key=order)
 
 
 def find_run_dir(logs: Path, regime: str, chosen: dict[str, Path]) -> Path | None:
@@ -118,7 +133,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--logs", type=Path, default=Path("logs"))
     parser.add_argument("--out", type=Path, default=Path("results"))
-    parser.add_argument("--regimes", nargs="+", default=["full", "frozen", "lora"])
+    parser.add_argument("--regimes", nargs="+", help="default: all regime folders in --logs")
     parser.add_argument("--run", action="append", default=[], metavar="REGIME=FOLDER")
     parser.add_argument(
         "--allow-mismatch",
@@ -127,9 +142,10 @@ def main():
     )
     args = parser.parse_args()
     chosen = parse_run_args(args.run)
+    regimes = args.regimes or find_regimes(args.logs)
 
     runs = {}
-    for regime in args.regimes:
+    for regime in regimes:
         run_dir = find_run_dir(args.logs, regime, chosen)
         if run_dir is None or not (run_dir / "metrics.csv").exists():
             print(f"Skipping {regime}: no finished run found under {args.logs / regime}")

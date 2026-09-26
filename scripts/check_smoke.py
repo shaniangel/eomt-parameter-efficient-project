@@ -8,6 +8,8 @@ For each regime:
       frozen: the backbone weights are identical to the pretrained ones
       lora:   the pretrained backbone weights are identical, and every LoRA ``lora_B``
               (which starts at zero) is non-zero, i.e. the adapters learned
+    (the kind of regime is read from each run's config.yaml, so the LoRA rank ablations
+    such as lora_r2 get the lora checks)
 
 Run it on the smoke runs (the default), whose short warmup gives the backbone and LoRA a
 non-zero learning rate. With the paper's warmup the backbone learning rate stays at 0 for
@@ -31,7 +33,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.summarize_results import find_run_dir, parse_run_args  # noqa: E402
+from scripts.summarize_results import find_regimes, find_run_dir, parse_run_args  # noqa: E402
 
 BACKBONE = "network.encoder.backbone."
 
@@ -94,6 +96,12 @@ def check_run(regime: str, run_dir: Path) -> bool:
     if lora_b:
         print(f"  LoRA lora_B tensors still zero: {len(zero_lora_b)} of {len(lora_b)}")
 
+    model_args = config["model"]["init_args"]
+    kind = (
+        "lora" if model_args.get("lora_rank", 0) > 0
+        else "frozen" if model_args.get("freeze_backbone")
+        else "full"
+    )
     checks = {
         "full": [("backbone weights changed", len(changed) > 0)],
         "frozen": [("backbone weights unchanged", not changed)],
@@ -102,7 +110,7 @@ def check_run(regime: str, run_dir: Path) -> bool:
             ("LoRA adapters present", len(lora_b) > 0),
             ("LoRA adapters learned (lora_B non-zero)", len(lora_b) > 0 and not zero_lora_b),
         ],
-    }[regime]
+    }[kind]
     checks = [
         ("training loss decreased", len(losses) >= 2 and losses[-1] < losses[0]),
         ("validation mIoU increased", len(mious) >= 2 and mious[-1] > mious[0]),
@@ -115,13 +123,13 @@ def check_run(regime: str, run_dir: Path) -> bool:
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--logs", type=Path, default=Path("logs_smoke"))
-    parser.add_argument("--regimes", nargs="+", default=["full", "frozen", "lora"])
+    parser.add_argument("--regimes", nargs="+", help="default: all regime folders in --logs")
     parser.add_argument("--run", action="append", default=[], metavar="REGIME=FOLDER")
     args = parser.parse_args()
     chosen = parse_run_args(args.run)
 
     all_passed = True
-    for regime in args.regimes:
+    for regime in args.regimes or find_regimes(args.logs):
         run_dir = find_run_dir(args.logs, regime, chosen)
         if run_dir is None:
             print(f"{regime}: no finished run found under {args.logs / regime}, skipped")

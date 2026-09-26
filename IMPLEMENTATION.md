@@ -211,22 +211,26 @@ curves in the same file.
   - the paper's optimizer settings: lr 1e-4, layer-wise decay 0.8, weight decay 0.05;
   - 31 epochs, and CSV logging to `logs/`.
 - `full.yaml`, `frozen.yaml`, `lora.yaml`: only the regime settings and the run name.
+- `lora_r2.yaml`, `lora_r4.yaml`, `lora_r16.yaml`, `lora_r32.yaml`: the LoRA regime with another
+  rank, for a rank ablation (alpha = rank, so the scale stays 1).
 - `smoke.yaml`: a short learning test. 5 epochs of 20 training batches, 5 validation batches after
   each, a warmup shortened to [5, 5] steps so that the backbone and LoRA already train, and output
   to `logs_smoke/` so smoke runs never mix with real runs.
 
 ### `scripts/`
 
-- `run_experiments.sh [full] [frozen] [lora] [--smoke] [--resume <run folder>] [extra args]`:
-  trains the given regimes one after another on the current machine (give each machine one
+- `run_experiments.sh [regime...] [--smoke] [--resume <run folder>] [extra args]`: a regime is
+  any config in `configs/project/` except the base and smoke ones. It trains the given regimes one after another on the current machine (give each machine one
   regime to run them in parallel) and saves each console output to
   `logs/<regime>_<start time>.out`. It stops if a run fails. `--resume` continues an interrupted
   run from its latest checkpoint, in the same folder.
-- `check_smoke.py`: for each regime's latest smoke run, checks that the training loss went down,
+- `check_smoke.py`: for each regime's latest smoke run (the kind of regime is read from the
+  run's `config.yaml`, so rank ablations get the LoRA checks), checks that the training loss went down,
   the validation mIoU went up, and exactly the right weights changed compared with the pretrained
   DINOv2 weights (full: backbone changed; frozen: identical; LoRA: backbone identical and every
   LoRA `lora_B` non-zero). Prints PASS/FAIL and exits with an error code if anything fails.
 - `summarize_results.py`:
+  - By default covers every regime folder in `logs/`, rank ablations included.
   - For each regime, picks the latest finished run (or the one given with `--run`) and reads
     `metrics.csv` and `efficiency_stats.json`.
   - Compares the runs' `config.yaml` files and stops if they differ in anything besides the
