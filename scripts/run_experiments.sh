@@ -6,7 +6,7 @@
 #   bash scripts/run_experiments.sh <regime> --resume logs/<regime>/<run folder>
 #
 # A regime is any config in configs/project/ other than the base and smoke ones: full, frozen,
-# lora (rank 8), and the LoRA rank ablations lora_r2, lora_r4, lora_r16, lora_r32.
+# lora (rank 8), and the LoRA rank ablations lora_r2, lora_r4, lora_r16, lora_r32, lora_r128.
 # With no regime given, full, frozen and lora are run. To use one GPU machine per regime, run e.g.:
 #   machine A:  bash scripts/run_experiments.sh full
 #   machine B:  bash scripts/run_experiments.sh frozen

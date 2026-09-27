@@ -76,17 +76,22 @@ machines have the same GPU model and nothing else runs on them. Extra arguments 
 e.g. `--data.path /path/to/ade20k`.
 
 **Optional: LoRA rank ablation.** `lora.yaml` uses rank 8. `lora_r2.yaml`, `lora_r4.yaml`,
-`lora_r16.yaml` and `lora_r32.yaml` are the same regime with another rank (alpha = rank each time,
+`lora_r16.yaml`, `lora_r32.yaml` and `lora_r128.yaml` are the same regime with another rank (alpha = rank each time,
 so only the rank changes). Train them like any regime, e.g. `bash scripts/run_experiments.sh lora_r2`.
 Each takes about as long as the rank-8 run, and needs the same 31 epochs to be comparable.
 
-| Config | LoRA rank | LoRA parameters | Share of backbone |
-|---|---|---|---|
-| `lora_r2.yaml` | 2 | 13,824 | 0.06% |
-| `lora_r4.yaml` | 4 | 27,648 | 0.13% |
-| `lora.yaml` | 8 | 55,296 | 0.25% |
-| `lora_r16.yaml` | 16 | 110,592 | 0.50% |
-| `lora_r32.yaml` | 32 | 221,184 | 1.0% |
+| Config | LoRA rank | LoRA parameters | vs. the adapted `qkv`/`proj` weights | Share of backbone |
+|---|---|---|---|---|
+| `lora_r2.yaml` | 2 | 13,824 | 0.8% | 0.06% |
+| `lora_r4.yaml` | 4 | 27,648 | 1.6% | 0.13% |
+| `lora.yaml` | 8 | 55,296 | 3.1% | 0.25% |
+| `lora_r16.yaml` | 16 | 110,592 | 6.3% | 0.50% |
+| `lora_r32.yaml` | 32 | 221,184 | 12.5% | 1.0% |
+| `lora_r128.yaml` | 128 | 884,736 | 50% | 4.0% |
+
+The highest possible rank for these weights is 384. Even at that rank, LoRA can only match
+fine-tuning the attention weights of the last 3 blocks, since everything else stays frozen; a
+high rank such as 128 tests whether the rank is what limits LoRA.
 
 **3. Collect the results.** Copy the `logs/<regime>/` folders into `logs/` on one machine, then:
 

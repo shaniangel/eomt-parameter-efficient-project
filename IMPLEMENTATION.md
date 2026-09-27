@@ -211,7 +211,7 @@ curves in the same file.
   - the paper's optimizer settings: lr 1e-4, layer-wise decay 0.8, weight decay 0.05;
   - 31 epochs, and CSV logging to `logs/`.
 - `full.yaml`, `frozen.yaml`, `lora.yaml`: only the regime settings and the run name.
-- `lora_r2.yaml`, `lora_r4.yaml`, `lora_r16.yaml`, `lora_r32.yaml`: the LoRA regime with another
+- `lora_r2.yaml`, `lora_r4.yaml`, `lora_r16.yaml`, `lora_r32.yaml`, `lora_r128.yaml`: the LoRA regime with another
   rank, for a rank ablation (alpha = rank, so the scale stays 1).
 - `smoke.yaml`: a short learning test. 5 epochs of 20 training batches, 5 validation batches after
   each, a warmup shortened to [5, 5] steps so that the backbone and LoRA already train, and output
