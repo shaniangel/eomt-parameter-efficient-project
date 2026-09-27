@@ -96,7 +96,9 @@ python scripts/visualize_predictions.py # results/qualitative.png
 ```
 
 Both include every regime folder found in `logs/`, rank ablations included; pass
-`--regimes full frozen lora` to limit them.
+`--regimes full frozen lora` to limit them. LoRA runs are labelled by their rank, read from their
+`config.yaml`, so the main LoRA run (folder `logs/lora/`) appears as `lora_r8`, and the columns
+are ordered full, frozen, lora_r2, lora_r4, lora_r8, …
 
 ### Run folders
 

@@ -30,7 +30,13 @@ sys.path.insert(0, str(ROOT))
 
 from main import LightningCLI  # noqa: E402
 from training.progress import colorize  # noqa: E402
-from scripts.summarize_results import find_regimes, find_run_dir, parse_run_args  # noqa: E402
+from scripts.summarize_results import (  # noqa: E402
+    display_name,
+    find_regimes,
+    find_run_dir,
+    parse_run_args,
+    regime_order,
+)
 from datasets.lightning_data_module import LightningDataModule  # noqa: E402
 from training.lightning_module import LightningModule  # noqa: E402
 
@@ -112,16 +118,20 @@ def main():
                 for _, target in samples
             ]
 
-        preds[regime] = [predict(model, img.to(device)) for img, _ in samples]
+        name = display_name(regime, run_dir)
+        preds[name if name not in preds else regime] = [
+            predict(model, img.to(device)) for img, _ in samples
+        ]
         del model
 
-    columns = ["image", "ground truth"] + args.regimes
+    names = sorted(preds, key=regime_order)
+    columns = ["image", "ground truth"] + names
     fig, axes = plt.subplots(
         len(samples), len(columns), figsize=(3 * len(columns), 3 * len(samples)), squeeze=False
     )
     for row, (img, _) in enumerate(samples):
         panels = [img.permute(1, 2, 0).numpy(), colorize(gts[row])]
-        panels += [colorize(preds[r][row]) for r in args.regimes]
+        panels += [colorize(preds[name][row]) for name in names]
         for col, panel in enumerate(panels):
             axes[row, col].imshow(panel)
             axes[row, col].axis("off")

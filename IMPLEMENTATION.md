@@ -230,7 +230,8 @@ curves in the same file.
   DINOv2 weights (full: backbone changed; frozen: identical; LoRA: backbone identical and every
   LoRA `lora_B` non-zero). Prints PASS/FAIL and exits with an error code if anything fails.
 - `summarize_results.py`:
-  - By default covers every regime folder in `logs/`, rank ablations included.
+  - By default covers every regime folder in `logs/`, rank ablations included. LoRA runs are
+    labelled by their rank from `config.yaml`, so the main LoRA run appears as `lora_r8`.
   - For each regime, picks the latest finished run (or the one given with `--run`) and reads
     `metrics.csv` and `efficiency_stats.json`.
   - Compares the runs' `config.yaml` files and stops if they differ in anything besides the

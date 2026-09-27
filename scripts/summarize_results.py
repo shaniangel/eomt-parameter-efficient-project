@@ -21,6 +21,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import yaml
 
@@ -41,17 +42,38 @@ REGIME_SPECIFIC_SETTINGS = (
 )
 
 
-def find_regimes(logs: Path) -> list[str]:
-    """The regime folders in ``logs``: full, frozen, lora, then LoRA ablations by rank."""
-    def order(name: str):
-        main = ["full", "frozen", "lora"]
-        if name in main:
-            return (main.index(name), 0, name)
-        rank = name.removeprefix("lora_r")
-        return (len(main), int(rank) if rank.isdigit() else 0, name)
+def regime_order(name: str):
+    """Sort key: full, frozen, then LoRA runs by rank (lora_r2, lora_r8, ...)."""
+    if name in ("full", "frozen"):
+        return (("full", "frozen").index(name), 0, name)
+    rank = name.removeprefix("lora_r")
+    return (2, int(rank) if rank.isdigit() else 0, name)
 
+
+def find_regimes(logs: Path) -> list[str]:
+    """The regime folders in ``logs``."""
     names = [p.name for p in logs.iterdir() if p.is_dir()] if logs.is_dir() else []
-    return sorted(names, key=order)
+    return sorted(names, key=regime_order)
+
+
+def display_name(regime: str, run_dir: Path) -> str:
+    """The name shown in results: LoRA runs are named by their rank, so the rank-8 run in
+    logs/lora/ is shown as lora_r8 next to the rank ablations."""
+    config_path = run_dir / "config.yaml"
+    if config_path.exists():
+        rank = yaml.safe_load(config_path.read_text())["model"]["init_args"].get("lora_rank", 0)
+        if rank:
+            return f"lora_r{rank}"
+    return regime
+
+
+def label_runs(runs: dict) -> dict:
+    """Re-keys runs (by regime folder) by their display name, in display order."""
+    labelled = {}
+    for regime, run in runs.items():
+        name = display_name(regime, run["dir"])
+        labelled[name if name not in labelled else regime] = run
+    return dict(sorted(labelled.items(), key=lambda item: regime_order(item[0])))
 
 
 def find_run_dir(logs: Path, regime: str, chosen: dict[str, Path]) -> Path | None:
@@ -161,6 +183,7 @@ def main():
 
     if not runs:
         raise SystemExit("No runs found")
+    runs = label_runs(runs)
     check_settings(runs, args.allow_mismatch)
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -228,6 +251,7 @@ def main():
         ax.plot([e + 1 for e in epochs], [m * 100 for m in mious], marker="o", label=regime)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Validation mIoU (%)")
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()
