@@ -80,13 +80,16 @@ e.g. `--data.path /path/to/ade20k`.
 so only the rank changes). Train them like any regime, e.g. `bash scripts/run_experiments.sh lora_r2`.
 Each takes about as long as the rank-8 run, and needs the same 31 epochs to be comparable.
 
-| Config | LoRA rank | LoRA parameters | Share of backbone |
-|---|---|---|---|
-| `lora_r2.yaml` | 2 | 13,824 | 0.06% |
-| `lora_r4.yaml` | 4 | 27,648 | 0.13% |
-| `lora.yaml` | 8 | 55,296 | 0.25% |
-| `lora_r16.yaml` | 16 | 110,592 | 0.50% |
-| `lora_r32.yaml` | 32 | 221,184 | 1.0% |
+| Config | LoRA rank | LoRA parameters | vs. the adapted `qkv`/`proj` weights | Share of backbone |
+|---|---|---|---|---|
+| `lora_r2.yaml` | 2 | 13,824 | 0.8% | 0.06% |
+| `lora_r4.yaml` | 4 | 27,648 | 1.6% | 0.13% |
+| `lora.yaml` | 8 | 55,296 | 3.1% | 0.25% |
+| `lora_r16.yaml` | 16 | 110,592 | 6.3% | 0.50% |
+| `lora_r32.yaml` | 32 | 221,184 | 12.5% | 1.0% |
+
+The highest possible rank for these weights is 384. Even at that rank, LoRA can only match
+fine-tuning the attention weights of the last 3 blocks, since everything else stays frozen.
 
 **3. Collect the results.** Copy the `logs/<regime>/` folders into `logs/` on one machine, then:
 
